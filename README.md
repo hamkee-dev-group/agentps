@@ -215,4 +215,4 @@ Each handler module must expose a top-level `HANDLER` object derived from the in
 
 ## License
 
-No license file is included in this repository yet.
+MIT. See [LICENSE](/home/hamkee/repos/agentps/LICENSE:1).
