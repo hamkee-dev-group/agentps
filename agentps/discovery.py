@@ -39,6 +39,8 @@ def discover(registry: list[AgentInstance] | None = None,
     registry = registry if registry is not None else all_instances()
     panes = tmux_panes()
     rows: list[dict] = []
+    pid_to_handler: dict[int, object] = {}
+    pid_to_ppid: dict[int, int] = {}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
@@ -56,6 +58,10 @@ def discover(registry: list[AgentInstance] | None = None,
         except ValueError:
             uid = 0
         user = _user_for_uid(uid)
+        try:
+            ppid = int(st.get("PPid", "0"))
+        except ValueError:
+            ppid = 0
 
         instance, sess = instance_for_pid(handler, registry, cwd, start)
         agent_name = instance.name if instance else handler.name
@@ -79,6 +85,18 @@ def discover(registry: list[AgentInstance] | None = None,
             "where": _where_from_chain(pid, panes),
             "live_argv": proc_cmdline(pid) or None,
         })
+        pid_to_handler[pid] = handler
+        pid_to_ppid[pid] = ppid
+
+    # Drop wrapper-child rows: PIDs whose direct parent is also a detected
+    # process of the same handler. Gemini's bootstrap relaunches itself with
+    # --max-old-space-size, so parent and child are both gemini and represent
+    # the same user-facing session.
+    rows = [
+        r for r in rows
+        if pid_to_handler.get(pid_to_ppid.get(r["pid"], 0))
+        is not pid_to_handler.get(r["pid"])
+    ]
     rows.sort(key=lambda a: (a["agent"], a["pid"]))
     return rows
 
