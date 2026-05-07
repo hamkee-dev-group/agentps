@@ -8,6 +8,8 @@ It currently includes built-in handlers for:
 - Claude Code
 - Gemini CLI
 
+For an introduction and walkthrough, see the [agentps blog post](https://hamkee.net/blog/agentps-manage-coding-agent-sessions/).
+
 ## What it does
 
 - Lists live and historical agent sessions across supported tools
