@@ -511,11 +511,14 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                             f"{len(live_rows)} session(s)? [y/N]"):
                 msg = "kill aborted"
                 continue
-            sent, errors = signal_pids(pids, signal.SIGTERM)
+            sent, gone, errors = signal_pids(pids, signal.SIGTERM)
             refresh()
             selected.clear()
-            msg = f"signalled {sent}" + (f", {len(errors)} error(s)"
-                                         if errors else "")
+            msg = f"signalled {sent}"
+            if gone:
+                msg += f", {gone} already gone"
+            if errors:
+                msg += f", {len(errors)} error(s)"
         elif ch == ord("a"):
             if 0 <= focus < len(view) and view[focus][0] != "group":
                 r = rows[view[focus][1]]

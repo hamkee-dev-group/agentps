@@ -122,18 +122,6 @@ def proc_starttime(pid: int):
         return None
 
 
-def proc_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def parent_chain(pid: int, max_depth: int = _PARENT_MAX_DEPTH):
     chain = []
     cur = pid
