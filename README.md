@@ -7,6 +7,7 @@ It currently includes built-in handlers for:
 - OpenAI Codex CLI
 - Claude Code
 - Gemini CLI
+- opencode
 
 For an introduction and walkthrough, see the [agentps blog post](https://hamkee.net/blog/agentps-manage-coding-agent-sessions/).
 
@@ -162,6 +163,13 @@ Key actions:
 - Deduplicates per-project snapshot files by inner `sessionId`
 - Replays launch-only flags such as yolo or approval settings only when a live process is available
 
+### opencode
+
+- Reads `~/.local/share/opencode/opencode.db` (SQLite); there are no per-session files
+- Archived sessions are hidden; the session id itself is used as the display id
+- Replays the persisted model and agent on resume; launch-only flags such as `--dangerously-skip-permissions` only when a live process is available
+- Deletion removes the `session` row (child rows cascade) and any leftover `session_diff` blob
+
 ## Configuration
 
 Default config path:
@@ -196,7 +204,7 @@ dir = "~/work/.claude"
 EXAMPLE_FLAG = "1"
 ```
 
-Each `[[extra]]` entry binds a handler to another base directory and optional environment variables used during resume.
+Each `[[extra]]` entry binds a handler to another base directory and optional environment variables used during resume. `dir` is the handler's base directory, which is not always a dotfile config dir — for `opencode` it is the data dir holding `opencode.db` (default `~/.local/share/opencode`).
 
 ## Custom Handlers
 
@@ -217,4 +225,4 @@ Each handler module must expose a top-level `HANDLER` object derived from the in
 
 ## License
 
-MIT. See [LICENSE](/home/hamkee/repos/agentps/LICENSE:1).
+MIT. See [LICENSE](LICENSE).
