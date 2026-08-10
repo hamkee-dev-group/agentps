@@ -69,6 +69,18 @@ Show recent sessions found directly in agent config directories:
 agentps --traces list
 ```
 
+Stop a runaway agent, or every agent under a directory:
+
+```bash
+agentps kill 9b1c6f2e
+```
+
+Jump to the tmux pane an agent is running in:
+
+```bash
+agentps attach 9b1c6f2e
+```
+
 Resume a session by id or unambiguous prefix:
 
 ```bash
@@ -118,6 +130,8 @@ Subcommands:
 - `top`: interactive TUI; also the default when no subcommand is given
 - `list`: print the table to stdout
 - `resume PREFIX`: resume a session from its cwd
+- `attach PREFIX`: switch to the tmux pane an agent is running in
+- `kill ...`: signal the processes behind a session, by id prefix or cwd path
 - `delete ...`: delete sessions by id prefix or by cwd path
 
 Global options:
@@ -129,6 +143,14 @@ Global options:
 - `--config PATH`: alternate config file; governs both the UI settings and
   which agent instances exist. Missing file is an error rather than a silent
   fallback to the default
+
+Kill options:
+
+- `-9`, `--force`: send `SIGKILL` instead of `SIGTERM`
+- `-y`, `--yes`: skip confirmation
+
+`kill` signals every process behind the matched sessions, and refuses to signal
+the session agentps itself was launched from.
 
 Delete options:
 
@@ -143,13 +165,21 @@ Delete options:
 - `PID`: the process holding the session, or `-` for a session with nothing
   running. A trailing `+N` means N further processes share the same session —
   opencode opens one per attached client — and the number shown is the lowest
+- `S`: process state — `R` running, `S` sleeping, `D` uninterruptible,
+  `T` stopped, `Z` zombie
 - `USER`: owner of the session
 - `LAST_USED`: from the session artifact, or from the agent's own database for
   agents that do not keep per-session files
+- `AGE`: how long the process has been running
+- `IDLE`: time since the session was last written — the activity signal for an
+  agent nobody is watching. A long `IDLE` on a running process is an agent that
+  is waiting or stuck
 - `CWD`: the recorded working directory. Sessions whose cwd no longer exists
   are grouped below a separator in `list`, and dimmed in the TUI
 - `SESSION`: shortened session id
-- `WHERE`: tmux pane, screen, or ssh, when the process can be traced to one
+- `WHERE`: tmux pane, screen, or ssh when the process can be traced to one;
+  otherwise `via:<name>` for whatever launched it — a systemd unit, cron, or a
+  script — which is the usual case for agents started headlessly
 
 ## TUI
 
@@ -160,7 +190,9 @@ Key actions:
 - `j` / `k` or arrow keys: move
 - `Enter` or `o`: open or expand
 - `Space`: mark row or group
+- `a`: switch to the agent's tmux pane
 - `c`: copy the resume command using OSC52
+- `K`: SIGTERM the processes behind the focused or marked sessions
 - `d`: delete focused or marked sessions
 - `g`: toggle group-by-cwd
 - `s`: toggle sort between date and path

@@ -4,17 +4,19 @@ fallbacks). Pure presentation — no agent-specific logic."""
 from __future__ import annotations
 
 import curses
+import signal
 import sys
 
-from .actions import (copy_to_clipboard, perform_delete, resume_command_str,
-                      session_id)
+from .actions import (_self_pids, copy_to_clipboard, perform_delete,
+                      resume_command_str, session_id, signal_pids)
 from .core import ResumeUnavailable, all_instances
 from .discovery import discover, discover_all
-from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_pid,
+from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_idle, fmt_pid,
                      short_session, shorten)
 
 
-_TUI_HEADER = ["AGENT", "PID", "USER", "LAST_USED", "CWD", "SESSION", "WHERE"]
+_TUI_HEADER = ["AGENT", "PID", "S", "USER", "LAST_USED", "AGE", "IDLE", "CWD",
+               "SESSION", "WHERE"]
 
 
 def row_key(r) -> str:
@@ -28,15 +30,19 @@ def _tui_cells(r):
     return [
         r["agent"],
         fmt_pid(r),
+        r.get("state") or "-",
         r["user"],
         fmt_date(r.get("last_used")),
+        r.get("age") or "-",
+        fmt_idle(r.get("last_used")),
         r["cwd"],
         short_session(r.get("session")),
         r.get("where") or "-",
     ]
 
 
-_CWD_COL = 4
+_CWD_COL = _TUI_HEADER.index("CWD")
+_DATE_COL = _TUI_HEADER.index("LAST_USED")
 _MIN_CWD = 16
 _MARKER_WIDTH = 3      # focus mark, selection mark, space
 
@@ -66,9 +72,9 @@ def _fit(cells, widths):
 def _header_with_sort(sort_mode: str):
     cells = list(_TUI_HEADER)
     if sort_mode == "date":
-        cells[3] = cells[3] + SORT_DESC
+        cells[_DATE_COL] += SORT_DESC
     elif sort_mode == "path":
-        cells[4] = cells[4] + " " + SORT_ASC
+        cells[_CWD_COL] += " " + SORT_ASC
     return cells
 
 
@@ -88,7 +94,9 @@ def _tui_help(stdscr, delay: float) -> None:
         "",
         "  Actions",
         "    Enter / o          open session, or expand/collapse a group",
+        "    a                  switch to the tmux pane the agent runs in",
         "    c                  copy resume command for focused session (OSC52)",
+        "    K                  SIGTERM the process(es) behind the session",
         "    d                  delete focused or marked session(s)",
         "                       on a group header: deletes the entire group",
         "",
@@ -304,13 +312,12 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
             if item[0] == "group":
                 g = item[1]
                 indicator = "[-]" if g["cwd"] in expanded else "[+]"
-                cells = [
-                    indicator, "", "",
-                    fmt_date(g["last_used"]),
-                    g["cwd"],
-                    f"({len(g['children'])})",
-                    "",
-                ]
+                cells = [""] * len(_TUI_HEADER)
+                cells[0] = indicator
+                cells[_DATE_COL] = fmt_date(g["last_used"])
+                cells[_TUI_HEADER.index("IDLE")] = fmt_idle(g["last_used"])
+                cells[_CWD_COL] = g["cwd"]
+                cells[_TUI_HEADER.index("SESSION")] = f"({len(g['children'])})"
                 sel_count = sum(1 for c in g["children"]
                                 if row_key(rows[c]) in selected)
                 if sel_count == 0:
@@ -349,7 +356,7 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
 
         bar = (
             f" {focus + 1}/{len(view)}  "
-            f"Space:mark  Enter:open/expand  c:copy  d:del  "
+            f"Space:mark  Enter:open  a:attach  c:copy  K:kill  d:del  "
             f"g:group  s:sort  r:refresh  h:help  q:quit "
         )
         try:
@@ -480,6 +487,44 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
             if errors:
                 parts.append(f"{len(errors)} error(s)")
             msg = ", ".join(parts)
+        elif ch == ord("K"):
+            if selected:
+                target_rows = [r for r in rows if row_key(r) in selected]
+            elif 0 <= focus < len(view):
+                item = view[focus]
+                target_rows = ([rows[i] for i in item[1]["children"]]
+                               if item[0] == "group" else [rows[item[1]]])
+            else:
+                target_rows = []
+            live_rows = [r for r in target_rows if r.get("pid")]
+            if not live_rows:
+                msg = "no running process on the selected row(s)"
+                continue
+            mine = _self_pids()
+            pids = [p for r in live_rows for p in (r.get("pids") or [r["pid"]])
+                    if p not in mine]
+            if not pids:
+                msg = "that is the session running agentps — exit it instead"
+                continue
+            if not _tui_confirm(
+                    stdscr, f"Send SIGTERM to {len(pids)} process(es) in "
+                            f"{len(live_rows)} session(s)? [y/N]"):
+                msg = "kill aborted"
+                continue
+            sent, errors = signal_pids(pids, signal.SIGTERM)
+            refresh()
+            selected.clear()
+            msg = f"signalled {sent}" + (f", {len(errors)} error(s)"
+                                         if errors else "")
+        elif ch == ord("a"):
+            if 0 <= focus < len(view) and view[focus][0] != "group":
+                r = rows[view[focus][1]]
+                if r.get("pane"):
+                    return ("attach", r)
+                msg = f"no tmux pane for this session (running under: " \
+                      f"{r.get('where') or '-'})"
+            else:
+                msg = "no session focused"
         elif ch == ord("r"):
             refresh()
             msg = "refreshed"
@@ -507,6 +552,13 @@ def tui(delay: float = 60.0, sort_default: str = "date", registry=None) -> int:
         return 2
     if not result:
         return 0
+    if result[0] == "attach":
+        from .actions import attach
+        sid = session_id(result[1].get("session") or "")
+        if not sid:
+            print("focused row has no session id", file=sys.stderr)
+            return 1
+        return attach(sid, registry=registry)
     if result[0] == "open":
         row = result[1]
         sid = session_id(row.get("session") or "")

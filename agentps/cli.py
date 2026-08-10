@@ -11,10 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
-from .actions import delete, resume
+from .actions import attach, delete, kill, resume
 from .core import all_instances, load_config
 from .discovery import discover_all
-from .format import BAR, fmt_date, fmt_pid, short_session, shorten
+from .format import BAR, fmt_date, fmt_idle, fmt_pid, short_session, shorten
 from . import format as fmt_mod
 
 
@@ -25,7 +25,8 @@ def print_table(rows) -> None:
     if not rows:
         print("No CLI agents found.")
         return
-    header = ["AGENT", "PID", "USER", "LAST_USED", "CWD", "SESSION", "WHERE"]
+    header = ["AGENT", "PID", "S", "USER", "LAST_USED", "AGE", "IDLE", "CWD",
+              "SESSION", "WHERE"]
     out = [header]
     split_at = None  # row index where missing-cwd block begins
     for a in rows:
@@ -34,8 +35,11 @@ def print_table(rows) -> None:
         out.append([
             a["agent"],
             fmt_pid(a),
+            a.get("state") or "-",
             a["user"],
             fmt_date(a.get("last_used")),
+            a.get("age") or "-",
+            fmt_idle(a.get("last_used")),
             a["cwd"],
             short_session(a["session"]),
             shorten(a["where"], 28),
@@ -145,6 +149,18 @@ def main() -> int:
                          "config dirs)")
     dp.add_argument("-y", "--yes", action="store_true",
                     help="skip the confirmation prompt")
+    kp = sub.add_parser("kill", parents=[common],
+                        help="signal the processes behind a session")
+    kp.add_argument("prefix", nargs="+", metavar="ID-OR-PATH",
+                    help="session id (or 8+ char prefix), or a path "
+                         "(signals every live agent at or under that cwd)")
+    kp.add_argument("-9", "--force", action="store_true",
+                    help="send SIGKILL instead of SIGTERM")
+    kp.add_argument("-y", "--yes", action="store_true",
+                    help="skip the confirmation prompt")
+    ap = sub.add_parser("attach", parents=[common],
+                        help="switch to the tmux pane an agent runs in")
+    ap.add_argument("prefix", help="session id (or 8+ char prefix)")
     args = p.parse_args()
 
     if args.config is not None and not args.config.is_file():
@@ -170,6 +186,11 @@ def main() -> int:
         return delete(args.prefix, force=args.yes,
                       orphans=args.orphans, dupes=args.dupes,
                       registry=registry)
+    if args.cmd == "kill":
+        return kill(args.prefix, force=args.force, yes=args.yes,
+                    registry=registry)
+    if args.cmd == "attach":
+        return attach(args.prefix, registry=registry)
 
     if args.cmd == "list" or args.json or args.traces:
         rows = discover_all(registry, loose=args.all)
