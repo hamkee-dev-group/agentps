@@ -66,11 +66,8 @@ def discover(registry: list[AgentInstance] | None = None,
         instance, sess = instance_for_pid(handler, registry, cwd, start)
         agent_name = instance.name if instance else handler.name
         last_used = None
-        if sess:
-            try:
-                last_used = sess.stat().st_mtime
-            except OSError:
-                pass
+        if sess and instance:
+            last_used, _ = instance.handler.session_stat(instance, str(sess))
 
         rows.append({
             "agent": agent_name,
@@ -97,8 +94,36 @@ def discover(registry: list[AgentInstance] | None = None,
         if pid_to_handler.get(pid_to_ppid.get(r["pid"], 0))
         is not pid_to_handler.get(r["pid"])
     ]
+    rows = _merge_by_session(rows)
     rows.sort(key=lambda a: (a["agent"], a["pid"]))
     return rows
+
+
+def _merge_by_session(rows: list[dict]) -> list[dict]:
+    """Collapse processes sharing one session into a single row. opencode opens
+    a process per attached client, so one session can show three PIDs. Rows with
+    no session resolved stay separate — they are distinct unknowns."""
+    merged: dict[str, dict] = {}
+    out: list[dict] = []
+    # Lowest PID first, so the row we keep and the PID we show describe the
+    # same process — its cwd, tmux pane and cmdline stay consistent.
+    for r in sorted(rows, key=lambda r: r["pid"]):
+        key = r.get("session_path")
+        if not key:
+            r["pids"] = [r["pid"]]
+            out.append(r)
+            continue
+        first = merged.get(key)
+        if first is None:
+            r["pids"] = [r["pid"]]
+            merged[key] = r
+            out.append(r)
+        else:
+            first["pids"].append(r["pid"])
+    for r in out:
+        r["pids"].sort()
+        r["pid"] = r["pids"][0]
+    return out
 
 
 def enumerate_sessions(registry: list[AgentInstance] | None = None
@@ -127,15 +152,16 @@ def discover_all(registry: list[AgentInstance] | None = None,
     live = discover(registry, loose=loose)
     live_paths = {a["session_path"] for a in live if a.get("session_path")}
 
+    by_name = {inst.name: inst for inst in registry}
     rows = list(live)
     for s in enumerate_sessions(registry):
         if s["session_path"] in live_paths:
             continue
-        try:
-            uid = os.stat(s["session_path"]).st_uid
-            user = _user_for_uid(uid)
-        except OSError:
-            user = "?"
+        inst = by_name.get(s["agent"])
+        uid = None
+        if inst is not None:
+            _, uid = inst.handler.session_stat(inst, s["session_path"])
+        user = _user_for_uid(uid) if uid is not None else "?"
         rows.append({
             "agent": s["agent"],
             "pid": None,

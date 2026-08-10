@@ -4,10 +4,12 @@ Layout:  <config_dir>/opencode.db   (SQLite — drizzle schema, WAL mode)
          no per-session files; everything lives in the DB.
 
 The default config_dir is ~/.local/share/opencode. Opencode keeps the DB in
-WAL mode and other opencode processes may be writing to it while agentps
-runs, so we always open with mode=ro. We never write to the DB ourselves —
-delete is delegated to `opencode session delete`, which serializes through
-opencode's own locking.
+WAL mode and other opencode processes may be writing to it while agentps runs,
+so reads always open with mode=ro. Deletion is the one write we make; see
+delete_session for why it is a direct DELETE rather than a shell-out.
+
+Sessions have no file on disk, so session_stat is overridden — otherwise the
+LAST_USED and USER columns stat a synthetic path and render '?'.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ _DB_TIMEOUT_MS = 5000
 
 # Launch-only flags worth replaying when a live process is running. These
 # aren't persisted in the session row, so cold resumes can't replay them.
-_BOOL_FLAGS = {"--dangerously-skip-permissions", "--pure", "--print-logs"}
+_BOOL_FLAGS = {"--auto", "--pure", "--print-logs", "--mini"}
 
 
 def _connect_ro(db: Path) -> sqlite3.Connection | None:
@@ -115,6 +117,29 @@ class OpenCodeHandler(Handler):
                 "cwd": directory or "?",
                 "last_used": last_used,
             }
+
+    def session_stat(self, instance, session_path):
+        """time_updated from the DB; owner is whoever owns the DB file."""
+        sid = Path(session_path).name
+        db = instance.config_dir / _DB_FILE
+        try:
+            uid = db.stat().st_uid
+        except OSError:
+            uid = None
+        con = _connect_ro(db)
+        if con is None:
+            return None, uid
+        try:
+            row = con.execute(
+                "SELECT time_updated FROM session WHERE id = ?", (sid,)
+            ).fetchone()
+        except sqlite3.Error:
+            return None, uid
+        finally:
+            con.close()
+        if not row or row[0] is None:
+            return None, uid
+        return row[0] / 1000.0, uid
 
     def session_for_pid(self, instance, cwd, started):
         if not cwd:

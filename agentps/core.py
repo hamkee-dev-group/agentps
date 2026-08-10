@@ -24,10 +24,6 @@ USER_CONFIG_FILE = USER_CONFIG_DIR / "config.toml"
 USER_HANDLERS_DIR = USER_CONFIG_DIR / "handlers"
 
 
-# ---------------------------------------------------------------------------
-# Handler base class
-# ---------------------------------------------------------------------------
-
 class Handler:
     """Subclass this once per agent. Built-ins live in agentps/handlers/.
     User handlers live in ~/.config/agentps/handlers/ and shadow built-ins of
@@ -39,11 +35,16 @@ class Handler:
 
     name: str = ""                       # canonical name; matches `handler =` in config
     detect_substrings: list[str] = []    # in addition to f"/{config_dir.name}/"
-    nodey: bool = True                   # also peek argv[1] for node/bun/deno wrappers
 
     def find_sessions(self, instance: "AgentInstance") -> Iterator[dict]:
         """Yield session dicts: {session, session_path, cwd, last_used}."""
         return iter(())
+
+    def default_dirs(self, base: Path | None = None) -> tuple[Path, Path]:
+        """(sessions_dir, config_dir) for this handler, rooted at `base` when
+        the user points an [[extra]] at another install. Required: a handler
+        without it cannot be placed on disk and is skipped by build_registry."""
+        raise NotImplementedError
 
     def session_for_pid(self, instance: "AgentInstance", cwd: str | None,
                         started) -> Path | None:
@@ -61,6 +62,17 @@ class Handler:
                 best_mtime = m
                 best = s
         return Path(best["session_path"]) if best else None
+
+    def session_stat(self, instance: "AgentInstance",
+                     session_path: str) -> tuple[float | None, int | None]:
+        """(last_used, owner_uid) for one session. Default: stat the artifact.
+        Handlers whose sessions have no file on disk must override this, or the
+        LAST_USED and USER columns show '?'."""
+        try:
+            st = os.stat(session_path)
+        except OSError:
+            return None, None
+        return st.st_mtime, st.st_uid
 
     def trace_entries(self, instance: "AgentInstance",
                       limit: int) -> Iterator[str]:
@@ -92,10 +104,6 @@ class Handler:
             p.unlink()
 
 
-# ---------------------------------------------------------------------------
-# AgentInstance: a Handler + a place on disk
-# ---------------------------------------------------------------------------
-
 @dataclass
 class AgentInstance:
     name: str                                          # display label
@@ -109,10 +117,6 @@ class AgentInstance:
         """Detection substrings: dir-derived + handler defaults."""
         return [f"/{self.config_dir.name}/", *self.handler.detect_substrings]
 
-
-# ---------------------------------------------------------------------------
-# Handler registry (name -> Handler instance)
-# ---------------------------------------------------------------------------
 
 _HANDLERS: dict[str, Handler] = {}
 
@@ -163,7 +167,6 @@ def _load_handlers_from_dir(dir_path: Path, kind: str) -> None:
 
 def load_builtin_handlers() -> None:
     """Import the built-in handlers package. Each module registers itself."""
-    # Importing the package runs handlers/__init__.py which imports each module.
     from . import handlers  # noqa: F401
 
 
@@ -171,10 +174,6 @@ def load_user_handlers() -> None:
     """Load user handlers from ~/.config/agentps/handlers/."""
     _load_handlers_from_dir(USER_HANDLERS_DIR, "user")
 
-
-# ---------------------------------------------------------------------------
-# Config + registry assembly
-# ---------------------------------------------------------------------------
 
 @dataclass
 class UISettings:
@@ -227,13 +226,13 @@ def build_registry(cfg: Config | None = None) -> list[AgentInstance]:
     cfg = cfg or load_config()
     instances: list[AgentInstance] = []
 
-    # Built-in defaults: one instance per registered handler, with the
-    # handler's default dirs (set by the handler module).
     for name, handler in known_handlers().items():
-        defaults = getattr(handler, "default_dirs", None)
-        if not defaults:
+        try:
+            sessions_dir, config_dir = handler.default_dirs()
+        except NotImplementedError:
+            print(f"agentps: handler {name!r} has no default_dirs(); skipped",
+                  file=sys.stderr)
             continue
-        sessions_dir, config_dir = defaults()
         instances.append(AgentInstance(
             name=name,
             handler=handler,
@@ -241,7 +240,6 @@ def build_registry(cfg: Config | None = None) -> list[AgentInstance]:
             config_dir=config_dir,
         ))
 
-    # User-added extras.
     for row in cfg.extras:
         try:
             handler_name = row.get("handler") or row.get("name")
@@ -252,7 +250,7 @@ def build_registry(cfg: Config | None = None) -> list[AgentInstance]:
                 continue
             display = row.get("name") or handler_name
             base_dir = _expand(row["dir"])
-            sessions_dir, config_dir = handler.default_dirs(base_dir)  # type: ignore[attr-defined]
+            sessions_dir, config_dir = handler.default_dirs(base_dir)
             env = {str(k): str(v) for k, v in (row.get("env") or {}).items()}
             instances.append(AgentInstance(
                 name=display,
@@ -275,10 +273,6 @@ def all_instances(cfg: Config | None = None) -> list[AgentInstance]:
         load_user_handlers()
     return build_registry(cfg)
 
-
-# ---------------------------------------------------------------------------
-# Process detection (handler-aware)
-# ---------------------------------------------------------------------------
 
 def detect_handler(pid: int, registry: Iterable[AgentInstance],
                    loose: bool = False) -> Handler | None:
@@ -314,7 +308,6 @@ def detect_handler(pid: int, registry: Iterable[AgentInstance],
     if is_nodey and len(cmdline) >= 2:
         binary_paths.append(cmdline[1])
 
-    # Strong signal: comm OR any binary path's basename matches a handler.
     if comm in by_name:
         return by_name[comm]
     for bp in binary_paths:

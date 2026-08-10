@@ -32,3 +32,6 @@ htmlcov/
 # Local environment files
 .env
 .env.*
+
+# Local test suite — intentionally not published
+/tests/

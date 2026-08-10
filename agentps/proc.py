@@ -8,14 +8,9 @@ from datetime import datetime
 from pathlib import Path
 
 
-# Tunables — sane defaults; edit here if a deployment needs different values.
 _PARENT_MAX_DEPTH = 12
 _TMUX_TIMEOUT_S = 2
 
-
-# ---------------------------------------------------------------------------
-# /proc helpers
-# ---------------------------------------------------------------------------
 
 def _read(pid: int, name: str):
     try:
@@ -36,11 +31,20 @@ def proc_comm(pid: int) -> str:
     return raw.decode("utf-8", "replace").strip() if raw else ""
 
 
+_DELETED_SUFFIX = " (deleted)"
+
+
 def proc_cwd(pid: int) -> str | None:
+    """The process cwd. The kernel appends ' (deleted)' when the directory's
+    inode was replaced — which happens on any delete-and-recreate, so the path
+    is usually still valid. Strip it unless a directory really is named that."""
     try:
-        return os.readlink(f"/proc/{pid}/cwd")
+        path = os.readlink(f"/proc/{pid}/cwd")
     except (OSError, PermissionError):
         return None
+    if path.endswith(_DELETED_SUFFIX) and not os.path.isdir(path):
+        return path[: -len(_DELETED_SUFFIX)]
+    return path
 
 
 def proc_exe(pid: int) -> str | None:
@@ -119,10 +123,6 @@ def parent_chain(pid: int, max_depth: int = _PARENT_MAX_DEPTH):
         cur = ppid
     return chain
 
-
-# ---------------------------------------------------------------------------
-# tmux pane map
-# ---------------------------------------------------------------------------
 
 def tmux_panes() -> dict[int, str]:
     """{pid: 'session:window.pane'} for every tmux pane on the host. Empty if
