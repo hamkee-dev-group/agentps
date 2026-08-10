@@ -8,7 +8,7 @@ import sys
 
 from .actions import (copy_to_clipboard, perform_delete, resume_command_str,
                       session_id)
-from .core import all_instances
+from .core import ResumeUnavailable, all_instances
 from .discovery import discover, discover_all
 from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_pid,
                      short_session)
@@ -409,13 +409,18 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                             msg = f"no handler for {r['agent']!r}"
                         else:
                             cwd = r["cwd"] if r["cwd"] != "?" else "."
-                            cmd = resume_command_str(
-                                instance, sid, r.get("session_path") or "", cwd,
-                                live_argv=r.get("live_argv"),
-                            )
-                            status = copy_to_clipboard(cmd)
-                            msg = (cmd if status.startswith("copied")
-                                   else f"{status}: {cmd}")
+                            try:
+                                cmd = resume_command_str(
+                                    instance, sid,
+                                    r.get("session_path") or "", cwd,
+                                    live_argv=r.get("live_argv"),
+                                )
+                            except ResumeUnavailable as e:
+                                msg = str(e)
+                            else:
+                                status = copy_to_clipboard(cmd)
+                                msg = (cmd if status.startswith("copied")
+                                       else f"{status}: {cmd}")
         elif ch == ord("d"):
             if selected:
                 target_rows = [r for r in rows if row_key(r) in selected]
@@ -491,10 +496,14 @@ def tui(delay: float = 60.0, sort_default: str = "date", registry=None) -> int:
             print(f"no handler for {row['agent']!r}", file=sys.stderr)
             return 1
         cwd = row["cwd"] if row["cwd"] != "?" else "."
-        argv = instance.handler.resume_argv(
-            instance, sid, row.get("session_path") or "",
-            live_argv=row.get("live_argv"),
-        )
+        try:
+            argv = instance.handler.resume_argv(
+                instance, sid, row.get("session_path") or "",
+                live_argv=row.get("live_argv"),
+            )
+        except ResumeUnavailable as e:
+            print(f"agentps: {e}", file=sys.stderr)
+            return 1
         env = os.environ.copy()
         env.update(instance.env)
         try:

@@ -102,7 +102,15 @@ agentps delete --dupes
 ## Commands
 
 ```text
-agentps [--config PATH] [--all] [--json] [--traces] [-d SECONDS] [top|list|resume|delete]
+agentps [OPTIONS] [top|list|resume|delete] [OPTIONS]
+```
+
+Global options are accepted on either side of the subcommand, so both of these
+work:
+
+```bash
+agentps --json list
+agentps list --json
 ```
 
 Subcommands:
@@ -118,13 +126,30 @@ Global options:
 - `--traces`: include per-agent recent-session scans from config dirs
 - `--all`: looser process detection, with higher false-positive risk
 - `-d`, `--delay`: TUI refresh interval in seconds; `0` disables auto-refresh
-- `--config PATH`: alternate config file
+- `--config PATH`: alternate config file; governs both the UI settings and
+  which agent instances exist. Missing file is an error rather than a silent
+  fallback to the default
 
 Delete options:
 
 - `--orphans`: delete sessions whose cwd no longer exists
 - `--dupes`: delete duplicate copies of the same session id
 - `-y`, `--yes`: skip confirmation
+
+## Output columns
+
+- `AGENT`: the instance name, which is the handler name unless an `[[extra]]`
+  gave it another one
+- `PID`: the process holding the session, or `-` for a session with nothing
+  running. A trailing `+N` means N further processes share the same session —
+  opencode opens one per attached client — and the number shown is the lowest
+- `USER`: owner of the session
+- `LAST_USED`: from the session artifact, or from the agent's own database for
+  agents that do not keep per-session files
+- `CWD`: the recorded working directory. Sessions whose cwd no longer exists
+  are grouped below a separator in `list`, and dimmed in the TUI
+- `SESSION`: shortened session id
+- `WHERE`: tmux pane, screen, or ssh, when the process can be traced to one
 
 ## TUI
 
@@ -162,6 +187,13 @@ Key actions:
 - Scans `~/.gemini/tmp/`
 - Deduplicates per-project snapshot files by inner `sessionId`
 - Replays launch-only flags such as yolo or approval settings only when a live process is available
+- Gemini has no resume-by-id: `-r` takes `latest` or a position within the
+  project's sessions, so the index is only valid while that ordering holds.
+  agentps resolves it immediately before launching, and copied or printed
+  commands are emitted as `agentps resume <id>` so they re-resolve wherever
+  they are pasted
+- If a session can no longer be located, resume fails with a message instead
+  of falling back to the most recent session
 
 ### opencode
 

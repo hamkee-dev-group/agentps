@@ -9,7 +9,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .core import AgentInstance, all_instances
+from .core import AgentInstance, ResumeUnavailable, all_instances
 from .discovery import _cwd_missing, discover, discover_all, enumerate_sessions
 
 
@@ -46,8 +46,15 @@ def resume_argv(instance: AgentInstance, sid: str,
 
 def resume_command_str(instance: AgentInstance, sid: str, session_path: str,
                        cwd: str, live_argv: list[str] | None = None) -> str:
-    """Single shell line: env prefix + cd + the resume invocation."""
+    """Single shell line: env prefix + cd + the resume invocation.
+
+    For handlers that resume by position, the direct command would rot as soon
+    as the ordering changes, so the line delegates back to `agentps resume`,
+    which re-resolves the position when it actually runs. The argv is still
+    built here to fail early if the session is already unreachable."""
     argv = resume_argv(instance, sid, session_path, live_argv=live_argv)
+    if instance.handler.resume_by_position:
+        return f"agentps resume {shlex.quote(sid)}"
     cmd = " ".join(shlex.quote(a) for a in argv)
     if instance.env:
         env_str = " ".join(f"{k}={shlex.quote(v)}"
@@ -103,10 +110,17 @@ def resume(prefix: str, print_only: bool = False,
     cwd = s["cwd"] if s["cwd"] != "?" else "."
     session_path = s.get("session_path") or ""
     live_argv = s.get("live_argv")
-    argv = resume_argv(instance, sid, session_path, live_argv=live_argv)
+    try:
+        argv = resume_argv(instance, sid, session_path, live_argv=live_argv)
+        if print_only:
+            line = resume_command_str(instance, sid, session_path, cwd,
+                                      live_argv=live_argv)
+    except ResumeUnavailable as e:
+        print(f"agentps: {e}", file=sys.stderr)
+        return 1
 
     if print_only:
-        print(f"({resume_command_str(instance, sid, session_path, cwd, live_argv=live_argv)})")
+        print(f"({line})")
         return 0
 
     try:
