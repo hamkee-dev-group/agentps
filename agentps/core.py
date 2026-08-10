@@ -24,6 +24,11 @@ USER_CONFIG_FILE = USER_CONFIG_DIR / "config.toml"
 USER_HANDLERS_DIR = USER_CONFIG_DIR / "handlers"
 
 
+class ResumeUnavailable(Exception):
+    """A handler cannot build a resume command it is certain targets the asked-
+    for session. Always better than launching a different one."""
+
+
 class Handler:
     """Subclass this once per agent. Built-ins live in agentps/handlers/.
     User handlers live in ~/.config/agentps/handlers/ and shadow built-ins of
@@ -35,6 +40,10 @@ class Handler:
 
     name: str = ""                       # canonical name; matches `handler =` in config
     detect_substrings: list[str] = []    # in addition to f"/{config_dir.name}/"
+    # True when resume selects by position rather than by id, so a command
+    # built now points at a different session once the ordering changes.
+    # Copied and printed commands are routed through `agentps resume` instead.
+    resume_by_position: bool = False
 
     def find_sessions(self, instance: "AgentInstance") -> Iterator[dict]:
         """Yield session dicts: {session, session_path, cwd, last_used}."""

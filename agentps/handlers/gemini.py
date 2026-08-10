@@ -10,6 +10,11 @@ file.
 Resume:  gemini -r <index>      (1-based, position within unique sessions
                                  in the project, newest-first)
 
+gemini has no resume-by-id: `-r` takes "latest" or a position, so the index is
+only valid for as long as the ordering holds. agentps resolves it immediately
+before launching, and hands out `agentps resume <id>` for commands that get
+copied or printed, so they re-resolve wherever they are eventually pasted.
+
 Yolo / approval-mode aren't persisted in the session file — they're purely
 launch flags. If a live process is running we read its cmdline and replay
 those flags; for cold sessions we don't.
@@ -21,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from ..core import AgentInstance, Handler, HOME, register
+from ..core import AgentInstance, Handler, HOME, ResumeUnavailable, register
 
 
 def _read_project_root(project_dir: Path) -> str | None:
@@ -89,9 +94,30 @@ def _preserve_flags(live_argv: list[str]) -> list[str]:
     return out
 
 
+def _resume_selector(sid: str, session_path: str) -> list[str]:
+    """`-r N`, where N is the session's position among the project's sessions,
+    newest first. Resolved fresh on every call because the position moves as
+    sessions are created. Raises rather than falling back to `--resume latest`:
+    a wrong session opened silently is worse than a refusal."""
+    if not session_path:
+        raise ResumeUnavailable(
+            f"gemini session {sid} has no session file to locate it by")
+    p = Path(session_path)
+    target = _read_session_id(p)
+    if not target:
+        raise ResumeUnavailable(f"cannot read a sessionId from {p}")
+    for i, (found, _) in enumerate(_unique_sessions(p.parent.parent), start=1):
+        if found == target:
+            return ["-r", str(i)]
+    raise ResumeUnavailable(
+        f"gemini no longer lists session {target} under {p.parent.parent}; "
+        f"it may have been deleted")
+
+
 class GeminiHandler(Handler):
     name = "gemini"
     detect_substrings = ["gemini-cli"]
+    resume_by_position = True
 
     def default_dirs(self, base: Path | None = None):
         config_dir = base or (HOME / ".gemini")
@@ -133,19 +159,7 @@ class GeminiHandler(Handler):
         return None
 
     def resume_argv(self, instance, sid, session_path, live_argv=None):
-        argv = ["gemini"]
-        if session_path:
-            p = Path(session_path)
-            unique = _unique_sessions(p.parent.parent)
-            target_sid = _read_session_id(p)
-            for i, (s, _) in enumerate(unique, start=1):
-                if s == target_sid:
-                    argv.extend(["-r", str(i)])
-                    break
-            else:
-                argv.extend(["--resume", "latest"])
-        else:
-            argv.extend(["--resume", "latest"])
+        argv = ["gemini", *_resume_selector(sid, session_path)]
         if live_argv:
             argv.extend(_preserve_flags(live_argv))
         return argv
