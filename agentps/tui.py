@@ -10,20 +10,24 @@ from .actions import (copy_to_clipboard, perform_delete, resume_command_str,
                       session_id)
 from .core import all_instances
 from .discovery import discover, discover_all
-from .format import ARROWS, SORT_ASC, SORT_DESC, fmt_date, short_session
+from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_pid,
+                     short_session)
 
-
-# ---------------------------------------------------------------------------
-# Interactive TUI
-# ---------------------------------------------------------------------------
 
 _TUI_HEADER = ["AGENT", "PID", "USER", "LAST_USED", "CWD", "SESSION", "WHERE"]
+
+
+def row_key(r) -> str:
+    """Stable identity for a row. Selection and focus are keyed by this, never
+    by list position: the list is re-sorted on every refresh, so an index marks
+    a different session a minute later."""
+    return r.get("session_path") or f"pid:{r.get('pid')}"
 
 
 def _tui_cells(r):
     return [
         r["agent"],
-        str(r["pid"]) if r.get("pid") else "-",
+        fmt_pid(r),
         r["user"],
         fmt_date(r.get("last_used")),
         r["cwd"],
@@ -105,6 +109,18 @@ def _tui_help(stdscr, delay: float) -> None:
         return
 
 
+def _delete_prompt(target_rows) -> str:
+    """Name what is about to be deleted. A bare count is not enough to catch a
+    mis-selection before it is irreversible."""
+    if len(target_rows) == 1:
+        r = target_rows[0]
+        return (f"Delete {short_session(r.get('session'))} "
+                f"({r['agent']}) in {r['cwd']}? [y/N]")
+    cwds = {r["cwd"] for r in target_rows}
+    where = next(iter(cwds)) if len(cwds) == 1 else f"{len(cwds)} directories"
+    return f"Delete {len(target_rows)} sessions in {where}? [y/N]"
+
+
 def _tui_confirm(stdscr, prompt: str) -> bool:
     h, w = stdscr.getmaxyx()
     try:
@@ -155,6 +171,29 @@ def _build_groups(rows, sort_mode: str):
     return groups
 
 
+def _focus_target(view, rows, focus):
+    """What the cursor is on right now, as an identity we can search for after
+    the list is rebuilt: a group cwd or a row key."""
+    if not (0 <= focus < len(view)):
+        return None
+    kind, payload = view[focus]
+    if kind == "group":
+        return ("group", payload["cwd"])
+    return ("row", row_key(rows[payload]))
+
+
+def _find_focus(view, rows, target):
+    """Where that identity landed in the rebuilt view, or None if it is gone."""
+    kind, ident = target
+    for i, (item_kind, payload) in enumerate(view):
+        if kind == "group":
+            if item_kind == "group" and payload["cwd"] == ident:
+                return i
+        elif item_kind != "group" and row_key(rows[payload]) == ident:
+            return i
+    return None
+
+
 def _build_view(rows, group_mode: bool, sort_mode: str, expanded: set):
     if not group_mode:
         return [("row", i) for i in range(len(rows))]
@@ -171,7 +210,7 @@ def _build_view(rows, group_mode: bool, sort_mode: str, expanded: set):
     return view
 
 
-def _tui_main(stdscr, delay: float, sort_default: str):
+def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
     curses.curs_set(0)
     stdscr.keypad(True)
     timeout_ms = int(delay * 1000) if delay and delay > 0 else -1
@@ -185,16 +224,26 @@ def _tui_main(stdscr, delay: float, sort_default: str):
     except curses.error:
         pass
 
-    registry = all_instances()
+    if registry is None:
+        registry = all_instances()
     rows = discover_all(registry)
     sort_mode = sort_default if sort_default in ("date", "path") else "date"
     _sort_rows(rows, sort_mode)
     focus = 0
-    selected: set[int] = set()
+    selected: set[str] = set()
     scroll = 0
     msg = ""
     group_mode = False
     expanded: set = set()
+    refocus: tuple[str, str] | None = None
+
+    def refresh():
+        """Re-read state, keeping marks on the sessions they were put on and
+        the cursor on the row it was left on."""
+        nonlocal rows, selected, refocus
+        refocus = _focus_target(view, rows, focus)
+        rows = _sort_rows(discover_all(registry), sort_mode)
+        selected &= {row_key(r) for r in rows}
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -202,6 +251,11 @@ def _tui_main(stdscr, delay: float, sort_default: str):
         widths = _tui_widths(rows, header_cells)
         line_fmt = "  ".join(f"{{:<{x}}}" for x in widths)
         view = _build_view(rows, group_mode, sort_mode, expanded)
+        if refocus is not None:
+            found = _find_focus(view, rows, refocus)
+            if found is not None:
+                focus = found
+            refocus = None
         if focus >= len(view):
             focus = max(0, len(view) - 1)
 
@@ -235,7 +289,8 @@ def _tui_main(stdscr, delay: float, sort_default: str):
                     f"({len(g['children'])})",
                     "",
                 ]
-                sel_count = sum(1 for c in g["children"] if c in selected)
+                sel_count = sum(1 for c in g["children"]
+                                if row_key(rows[c]) in selected)
                 if sel_count == 0:
                     sel_mark = " "
                 elif sel_count == len(g["children"]):
@@ -252,15 +307,15 @@ def _tui_main(stdscr, delay: float, sort_default: str):
                 if idx == focus:
                     attr |= curses.A_REVERSE
             else:
-                row_idx = item[1]
-                r = rows[row_idx]
-                sel_mark = "*" if row_idx in selected else " "
+                r = rows[item[1]]
+                is_sel = row_key(r) in selected
+                sel_mark = "*" if is_sel else " "
                 line = (focus_mark + sel_mark + " "
                         + line_fmt.format(*_tui_cells(r)))[: w - 1]
                 attr = 0
                 if r.get("cwd_missing"):
                     attr |= curses.A_DIM
-                if row_idx in selected:
+                if is_sel:
                     attr |= sel_attr
                 if idx == focus:
                     attr |= curses.A_REVERSE
@@ -289,9 +344,7 @@ def _tui_main(stdscr, delay: float, sort_default: str):
 
         ch = stdscr.getch()
         if ch == -1:
-            rows = discover_all(registry)
-            _sort_rows(rows, sort_mode)
-            selected = {i for i in selected if i < len(rows)}
+            refresh()
             continue
         if ch in (ord("q"), 27):
             return None
@@ -320,19 +373,13 @@ def _tui_main(stdscr, delay: float, sort_default: str):
             if 0 <= focus < len(view):
                 item = view[focus]
                 if item[0] == "group":
-                    children = item[1]["children"]
-                    if children and all(i in selected for i in children):
-                        for i in children:
-                            selected.discard(i)
+                    keys = [row_key(rows[i]) for i in item[1]["children"]]
+                    if keys and all(k in selected for k in keys):
+                        selected.difference_update(keys)
                     else:
-                        for i in children:
-                            selected.add(i)
+                        selected.update(keys)
                 else:
-                    idx = item[1]
-                    if idx in selected:
-                        selected.remove(idx)
-                    else:
-                        selected.add(idx)
+                    selected ^= {row_key(rows[item[1]])}
                 focus = min(max(0, len(view) - 1), focus + 1)
         elif ch in (curses.KEY_ENTER, 10, 13, ord("o")):
             if 0 <= focus < len(view):
@@ -366,24 +413,23 @@ def _tui_main(stdscr, delay: float, sort_default: str):
                                 instance, sid, r.get("session_path") or "", cwd,
                                 live_argv=r.get("live_argv"),
                             )
-                            copy_to_clipboard(cmd)
-                            msg = cmd
+                            status = copy_to_clipboard(cmd)
+                            msg = (cmd if status.startswith("copied")
+                                   else f"{status}: {cmd}")
         elif ch == ord("d"):
             if selected:
-                target_indices = sorted(selected)
+                target_rows = [r for r in rows if row_key(r) in selected]
             elif 0 <= focus < len(view):
                 item = view[focus]
                 if item[0] == "group":
-                    target_indices = list(item[1]["children"])
+                    target_rows = [rows[i] for i in item[1]["children"]]
                 else:
-                    target_indices = [item[1]]
+                    target_rows = [rows[item[1]]]
             else:
-                target_indices = []
-            target_rows = [rows[i] for i in target_indices if 0 <= i < len(rows)]
+                target_rows = []
             if not target_rows:
                 continue
-            if not _tui_confirm(stdscr,
-                                f"Delete {len(target_rows)} session(s)? [y/N]"):
+            if not _tui_confirm(stdscr, _delete_prompt(target_rows)):
                 msg = "delete aborted"
                 continue
             live_paths = {a["session_path"] for a in discover(registry)
@@ -399,8 +445,7 @@ def _tui_main(stdscr, delay: float, sort_default: str):
                     continue
                 targets.append((sid, r))
             removed, errors = perform_delete(targets, registry)
-            rows = discover_all(registry)
-            _sort_rows(rows, sort_mode)
+            refresh()
             selected.clear()
             parts = [f"removed {removed}"]
             if skipped_live:
@@ -409,9 +454,7 @@ def _tui_main(stdscr, delay: float, sort_default: str):
                 parts.append(f"{len(errors)} error(s)")
             msg = ", ".join(parts)
         elif ch == ord("r"):
-            rows = discover_all(registry)
-            _sort_rows(rows, sort_mode)
-            selected = {i for i in selected if i < len(rows)}
+            refresh()
             msg = "refreshed"
         elif ch == ord("s"):
             sort_mode = "path" if sort_mode == "date" else "date"
@@ -424,10 +467,17 @@ def _tui_main(stdscr, delay: float, sort_default: str):
             _tui_help(stdscr, delay)
 
 
-def tui(delay: float = 60.0, sort_default: str = "date") -> int:
+def tui(delay: float = 60.0, sort_default: str = "date", registry=None) -> int:
     import os
 
-    result = curses.wrapper(_tui_main, delay, sort_default)
+    if registry is None:
+        registry = all_instances()
+    try:
+        result = curses.wrapper(_tui_main, delay, sort_default, registry)
+    except curses.error as e:
+        print(f"agentps: cannot start the interactive view ({e}). "
+              f"Use `agentps list` when there is no terminal.", file=sys.stderr)
+        return 2
     if not result:
         return 0
     if result[0] == "open":
@@ -436,7 +486,6 @@ def tui(delay: float = 60.0, sort_default: str = "date") -> int:
         if not sid:
             print("focused row has no session id", file=sys.stderr)
             return 1
-        registry = all_instances()
         instance = next((i for i in registry if i.name == row["agent"]), None)
         if instance is None:
             print(f"no handler for {row['agent']!r}", file=sys.stderr)

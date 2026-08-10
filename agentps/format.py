@@ -57,7 +57,19 @@ def fmt_date(ts) -> str:
 def shorten(s: str, n: int) -> str:
     if len(s) <= n:
         return s
+    if n <= len(ELLIPSIS):
+        return s[-n:] if n > 0 else ""
     return ELLIPSIS + s[-(n - len(ELLIPSIS)):]
+
+
+def fmt_pid(row) -> str:
+    """PID cell. A session can be held by several processes (opencode opens one
+    per attached client); show the primary and how many more."""
+    pid = row.get("pid")
+    if not pid:
+        return "-"
+    extra = len(row.get("pids") or []) - 1
+    return f"{pid}+{extra}" if extra > 0 else str(pid)
 
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)

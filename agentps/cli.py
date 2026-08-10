@@ -14,7 +14,7 @@ from . import __version__
 from .actions import delete, resume
 from .core import all_instances, load_config
 from .discovery import discover_all
-from .format import BAR, fmt_date, short_session, shorten
+from .format import BAR, fmt_date, fmt_pid, short_session, shorten
 from . import format as fmt_mod
 
 
@@ -33,7 +33,7 @@ def print_table(rows) -> None:
             split_at = len(out)
         out.append([
             a["agent"],
-            str(a["pid"]) if a.get("pid") else "-",
+            fmt_pid(a),
             a["user"],
             fmt_date(a.get("last_used")),
             a["cwd"],
@@ -53,11 +53,11 @@ def print_table(rows) -> None:
             print("  ".join("-" * w for w in widths))
 
 
-def print_traces() -> None:
+def print_traces(registry) -> None:
     """Per-instance recent-sessions dump. Uses each handler's trace_entries."""
     print()
     print("# Recent agent sessions (config-dir scan)")
-    for inst in all_instances():
+    for inst in registry:
         print(f"\n## {inst.name}  ({inst.config_dir})")
         if not inst.config_dir.exists():
             print("  (no config dir)")
@@ -71,6 +71,26 @@ def print_traces() -> None:
             emitted += 1
         if emitted == 0:
             print("  (empty)")
+
+
+def _add_global_flags(parser, suppress: bool = False) -> None:
+    """Flags accepted both before and after the subcommand. On the subcommand
+    copies, defaults are suppressed so they only speak when actually passed."""
+    d = argparse.SUPPRESS if suppress else None
+    parser.add_argument("--traces", action="store_true", default=d,
+                        help="also show recent sessions in agent config dirs")
+    parser.add_argument("--json", action="store_true", default=d,
+                        help="emit JSON instead of a table")
+    parser.add_argument("--all", action="store_true", default=d,
+                        help="loosen detection (more matches, more false "
+                             "positives)")
+    parser.add_argument("-d", "--delay", type=float, default=d,
+                        metavar="SECONDS",
+                        help="TUI auto-refresh interval in seconds "
+                             "(default: 60; 0 disables auto-refresh)")
+    parser.add_argument("--config", type=Path, default=d, metavar="PATH",
+                        help="path to config file "
+                             "(default: ~/.config/agentps/config.toml)")
 
 
 def main() -> int:
@@ -95,28 +115,26 @@ def main() -> int:
     )
     p.add_argument("--version", action="version",
                    version=f"agentps {__version__}")
-    p.add_argument("--traces", action="store_true",
-                   help="also show recent sessions in agent config dirs")
-    p.add_argument("--json", action="store_true",
-                   help="emit JSON instead of a table")
-    p.add_argument("--all", action="store_true",
-                   help="loosen detection (more matches, more false positives)")
-    p.add_argument("-d", "--delay", type=float, default=None, metavar="SECONDS",
-                   help="TUI auto-refresh interval in seconds (default: 60; "
-                        "0 disables auto-refresh)")
-    p.add_argument("--config", type=Path, default=None, metavar="PATH",
-                   help="path to config file "
-                        "(default: ~/.config/agentps/config.toml)")
+    _add_global_flags(p)
+
+    # The same flags again on every subcommand, so both `agentps --json list`
+    # and `agentps list --json` work. SUPPRESS keeps an unused subcommand flag
+    # from overwriting the value already parsed from the main parser.
+    common = argparse.ArgumentParser(add_help=False)
+    _add_global_flags(common, suppress=True)
 
     sub = p.add_subparsers(dest="cmd")
-    sub.add_parser("top", help="interactive TUI (default mode)")
-    sub.add_parser("list", help="print the table to stdout")
-    rp = sub.add_parser("resume",
+    sub.add_parser("top", parents=[common],
+                   help="interactive TUI (default mode)")
+    sub.add_parser("list", parents=[common],
+                   help="print the table to stdout")
+    rp = sub.add_parser("resume", parents=[common],
                         help="cd to the session's dir and launch the agent")
     rp.add_argument("prefix", help="session id (or 8+ char prefix)")
     rp.add_argument("--print", dest="print_only", action="store_true",
                     help="print the resume command instead of running it")
-    dp = sub.add_parser("delete", help="delete one or more sessions")
+    dp = sub.add_parser("delete", parents=[common],
+                        help="delete one or more sessions")
     dp.add_argument("prefix", nargs="*", metavar="ID-OR-PATH",
                     help="session id (or 8+ char prefix), or a path "
                          "(deletes every session at or under that cwd)")
@@ -129,31 +147,42 @@ def main() -> int:
                     help="skip the confirmation prompt")
     args = p.parse_args()
 
+    if args.config is not None and not args.config.is_file():
+        print(f"agentps: config not found: {args.config}", file=sys.stderr)
+        return 2
     cfg = load_config(args.config)
 
-    # Apply config-driven overrides for format helpers (date format, etc).
     if cfg.ui.date:
         fmt_mod.DATE_FMT = cfg.ui.date
     delay = args.delay if args.delay is not None else cfg.ui.delay
     sort_default = cfg.ui.sort or "date"
 
+    # Built once from the resolved config, then passed down, so --config
+    # governs which agent instances exist and not just the UI settings.
+    registry = all_instances(cfg)
+
     if args.cmd == "resume":
-        return resume(args.prefix, print_only=args.print_only)
+        return resume(args.prefix, print_only=args.print_only,
+                      registry=registry)
     if args.cmd == "delete":
         if not args.orphans and not args.dupes and not args.prefix:
             dp.error("specify at least one prefix, or use --orphans/--dupes")
         return delete(args.prefix, force=args.yes,
-                      orphans=args.orphans, dupes=args.dupes)
+                      orphans=args.orphans, dupes=args.dupes,
+                      registry=registry)
 
     if args.cmd == "list" or args.json or args.traces:
-        rows = discover_all(loose=args.all)
+        rows = discover_all(registry, loose=args.all)
         if args.json:
+            if args.traces:
+                print("agentps: --traces has no JSON form; ignored",
+                      file=sys.stderr)
             print(json.dumps(rows, indent=2, default=str))
             return 0
         print_table(rows)
         if args.traces:
-            print_traces()
+            print_traces(registry)
         return 0
 
     from .tui import tui
-    return tui(delay=delay, sort_default=sort_default)
+    return tui(delay=delay, sort_default=sort_default, registry=registry)

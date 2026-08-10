@@ -66,8 +66,6 @@ def _unique_sessions(project_dir: Path) -> list[tuple[str, Path]]:
     return list(seen.items())
 
 
-# Launch-time flags worth preserving across resume. Boolean flags listed in
-# _BOOL_FLAGS; value flags in _VALUE_FLAGS (each takes one positional arg).
 _BOOL_FLAGS = {"-y", "--yolo", "--skip-trust", "-s", "--sandbox"}
 _VALUE_FLAGS = {"--approval-mode", "--policy", "--admin-policy",
                 "--include-directories", "-m", "--model"}

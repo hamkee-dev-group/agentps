@@ -13,10 +13,6 @@ from .core import AgentInstance, all_instances
 from .discovery import _cwd_missing, discover, discover_all, enumerate_sessions
 
 
-# ---------------------------------------------------------------------------
-# Session-id helper
-# ---------------------------------------------------------------------------
-
 _UUID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
 _SHORT_HEX_RE = re.compile(r"-([0-9a-f]{8,})\.[a-z]+$", re.I)
 
@@ -33,10 +29,6 @@ def session_id(name: str | None) -> str | None:
     return name
 
 
-# ---------------------------------------------------------------------------
-# Registry lookup helpers
-# ---------------------------------------------------------------------------
-
 def _instance_by_name(registry: list[AgentInstance],
                       name: str) -> AgentInstance | None:
     for inst in registry:
@@ -44,10 +36,6 @@ def _instance_by_name(registry: list[AgentInstance],
             return inst
     return None
 
-
-# ---------------------------------------------------------------------------
-# Resume
-# ---------------------------------------------------------------------------
 
 def resume_argv(instance: AgentInstance, sid: str,
                 session_path: str = "",
@@ -86,8 +74,9 @@ def copy_to_clipboard(text: str) -> str:
         return f"copy failed: {e}"
 
 
-def resume(prefix: str, print_only: bool = False) -> int:
-    registry = all_instances()
+def resume(prefix: str, print_only: bool = False,
+           registry: list[AgentInstance] | None = None) -> int:
+    registry = registry if registry is not None else all_instances()
     # Use discover_all so live rows carry their cmdline (live_argv), which
     # gemini needs to replay -y / --approval-mode etc. Live rows sort first
     # because session_path collisions are deduped by discover_all already.
@@ -137,10 +126,6 @@ def resume(prefix: str, print_only: bool = False) -> int:
         return 1
     return 0  # unreachable on success
 
-
-# ---------------------------------------------------------------------------
-# Delete
-# ---------------------------------------------------------------------------
 
 def _resolve_dupes(registry: list[AgentInstance]):
     """Sessions whose id appears in multiple instances. Returns the *losers*."""
@@ -233,8 +218,9 @@ def perform_delete(targets, registry):
 
 
 def delete(prefixes, force: bool = False, orphans: bool = False,
-           dupes: bool = False) -> int:
-    registry = all_instances()
+           dupes: bool = False,
+           registry: list[AgentInstance] | None = None) -> int:
+    registry = registry if registry is not None else all_instances()
     note = None
     if dupes:
         targets = _resolve_dupes(registry)
