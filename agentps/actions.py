@@ -8,7 +8,6 @@ import re
 import shlex
 import signal
 import sys
-from pathlib import Path
 
 from .core import AgentInstance, ResumeUnavailable, all_instances
 from .discovery import _cwd_missing, discover, discover_all, enumerate_sessions
@@ -153,25 +152,36 @@ def _self_pids() -> set[int]:
 
 def _live_matches(prefixes, registry):
     """Live rows whose session id starts with one of the prefixes, or whose cwd
-    is at or under a path argument. Returns (rows, error)."""
+    is at or under a path argument. Returns (rows, error).
+
+    An id prefix must identify one session: signalling is destructive, so a
+    short prefix that happens to match two agents is refused rather than
+    applied to both. A path argument is explicitly plural."""
     live = discover(registry)
     out: dict[int, dict] = {}
     for arg in prefixes:
-        matched = False
-        for r in live:
-            sid = session_id(r.get("session") or "")
-            if "/" in arg:
-                base = arg.rstrip("/")
-                if not base:
-                    return [], "refusing path '/' — name a directory"
-                hit = r["cwd"] == base or r["cwd"].startswith(base + "/")
-            else:
-                hit = bool(sid and sid.startswith(arg))
-            if hit:
-                out[r["pid"]] = r
-                matched = True
-        if not matched:
+        if "/" in arg:
+            base = arg.rstrip("/")
+            if not base:
+                return [], "refusing path '/' — name a directory"
+            hits = [r for r in live
+                    if r["cwd"] == base or r["cwd"].startswith(base + "/")]
+            if not hits:
+                return [], f"no live agent under path {arg!r}"
+            out.update({r["pid"]: r for r in hits})
+            continue
+
+        hits = [r for r in live
+                if (session_id(r.get("session") or "") or "").startswith(arg)]
+        if not hits:
             return [], f"no live agent matching {arg!r}"
+        distinct = {r.get("session_path") or f"pid:{r['pid']}" for r in hits}
+        if len(distinct) > 1:
+            lines = [f"prefix {arg!r} is ambiguous:"]
+            for r in hits:
+                lines.append(f"  {short_id(r)}  {r['agent']:10}  {r['cwd']}")
+            return [], "\n".join(lines)
+        out.update({r["pid"]: r for r in hits})
     return list(out.values()), None
 
 
@@ -212,11 +222,12 @@ def kill(prefixes, force: bool = False, yes: bool = False,
             print("aborted.")
             return 0
 
-    signalled, errors = signal_pids([p for _, pids in targets for p in pids],
-                                    sig)
+    signalled, gone, errors = signal_pids(
+        [p for _, pids in targets for p in pids], sig)
     for e in errors:
         print(e, file=sys.stderr)
-    print(f"signalled {signalled} process(es).")
+    note = f", {gone} had already exited" if gone else ""
+    print(f"signalled {signalled} process(es){note}.")
     return 0 if not errors else 1
 
 
@@ -224,20 +235,24 @@ def short_id(row) -> str:
     return session_id(row.get("session") or "") or f"pid:{row.get('pid')}"
 
 
-def signal_pids(pids, sig) -> tuple[int, list[str]]:
+def signal_pids(pids, sig) -> tuple[int, int, list[str]]:
+    """(signalled, already_gone, errors). A process that exits between listing
+    and signalling is not a failure — the state the caller wanted is the state
+    it got — so it is counted separately and never fails the command."""
     sent = 0
+    gone = 0
     errors = []
     for pid in pids:
         try:
             os.kill(pid, sig)
             sent += 1
         except ProcessLookupError:
-            errors.append(f"pid {pid} already gone")
+            gone += 1
         except PermissionError:
             errors.append(f"pid {pid}: not permitted")
         except OSError as e:
             errors.append(f"pid {pid}: {e}")
-    return sent, errors
+    return sent, gone, errors
 
 
 def attach(prefix: str, registry: list[AgentInstance] | None = None) -> int:

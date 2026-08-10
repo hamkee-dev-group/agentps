@@ -7,7 +7,6 @@ import json
 import locale
 import signal
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from . import __version__

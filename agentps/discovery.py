@@ -124,6 +124,15 @@ def _is_relaunch_child(row, pid_to_handler, pid_to_ppid) -> bool:
     return any(_RELAUNCH_FLAG in a for a in (row.get("live_argv") or []))
 
 
+# Most-active-wins, so a session with one running process reads as running.
+# Reporting only the lowest PID's state would call a busy session idle.
+_STATE_RANK = {"R": 5, "D": 4, "S": 3, "T": 2, "Z": 1}
+
+
+def _busiest(a: str | None, b: str | None) -> str:
+    return max((a or ""), (b or ""), key=lambda s: _STATE_RANK.get(s, 0))
+
+
 def _merge_by_session(rows: list[dict]) -> list[dict]:
     """Collapse processes sharing one session into a single row. opencode opens
     a process per attached client, so one session can show three PIDs. Rows with
@@ -145,6 +154,7 @@ def _merge_by_session(rows: list[dict]) -> list[dict]:
             out.append(r)
         else:
             first["pids"].append(r["pid"])
+            first["state"] = _busiest(first.get("state"), r.get("state"))
     for r in out:
         r["pids"].sort()
         r["pid"] = r["pids"][0]

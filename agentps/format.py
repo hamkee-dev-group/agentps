@@ -38,7 +38,9 @@ DATE_FMT = "%m-%d-%Y"
 def fmt_age(start) -> str:
     if not start:
         return "?"
-    s = (datetime.now() - start).total_seconds()
+    # Clamped: a clock adjustment or a file written by a host whose clock runs
+    # ahead would otherwise render as a negative age.
+    s = max(0.0, (datetime.now() - start).total_seconds())
     if s < 60:
         return f"{int(s)}s"
     if s < 3600:
