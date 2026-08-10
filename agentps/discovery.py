@@ -85,18 +85,26 @@ def discover(registry: list[AgentInstance] | None = None,
         pid_to_handler[pid] = handler
         pid_to_ppid[pid] = ppid
 
-    # Drop wrapper-child rows: PIDs whose direct parent is also a detected
-    # process of the same handler. Gemini's bootstrap relaunches itself with
-    # --max-old-space-size, so parent and child are both gemini and represent
-    # the same user-facing session.
-    rows = [
-        r for r in rows
-        if pid_to_handler.get(pid_to_ppid.get(r["pid"], 0))
-        is not pid_to_handler.get(r["pid"])
-    ]
+    rows = [r for r in rows
+            if not _is_relaunch_child(r, pid_to_handler, pid_to_ppid)]
     rows = _merge_by_session(rows)
     rows.sort(key=lambda a: (a["agent"], a["pid"]))
     return rows
+
+
+# Gemini's bootstrap fork-execs itself to grow the heap, so parent and child
+# are both gemini and stand for one user-facing session. Matching the flag
+# keeps a genuinely nested session — an agent launched from inside another
+# agent's shell — from being swallowed as if it were a relauncher.
+_RELAUNCH_FLAG = "--max-old-space-size"
+
+
+def _is_relaunch_child(row, pid_to_handler, pid_to_ppid) -> bool:
+    pid = row["pid"]
+    parent = pid_to_ppid.get(pid, 0)
+    if pid_to_handler.get(parent) is not pid_to_handler.get(pid):
+        return False
+    return any(_RELAUNCH_FLAG in a for a in (row.get("live_argv") or []))
 
 
 def _merge_by_session(rows: list[dict]) -> list[dict]:

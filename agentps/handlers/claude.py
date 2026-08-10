@@ -79,19 +79,12 @@ class ClaudeHandler(Handler):
         for d in pdir.iterdir():
             if not d.is_dir():
                 continue
-            jsonls = list(d.glob("*.jsonl"))
-            if not jsonls:
-                continue
-            cwd = None
-            try:
-                sample = max(jsonls, key=lambda p: p.stat().st_mtime)
-                cwd = _read_recorded_cwd(sample)
-            except OSError:
-                pass
-            if not cwd:
-                # Fallback: lossy decode of the encoded dir name.
-                cwd = "/" + d.name.lstrip("-").replace("-", "/")
-            for jf in jsonls:
+            # Lossy decode of the encoded dir name, used only where a session
+            # does not record its own cwd. `/home/u/my-proj` and `/home/u/my/proj`
+            # encode identically, so one session's cwd cannot speak for its
+            # siblings — each file is read for its own.
+            fallback = "/" + d.name.lstrip("-").replace("-", "/")
+            for jf in d.glob("*.jsonl"):
                 try:
                     m = jf.stat().st_mtime
                 except OSError:
@@ -99,7 +92,7 @@ class ClaudeHandler(Handler):
                 yield {
                     "session": jf.name,
                     "session_path": str(jf),
-                    "cwd": cwd,
+                    "cwd": _read_recorded_cwd(jf) or fallback,
                     "last_used": m,
                 }
 

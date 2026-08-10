@@ -161,8 +161,12 @@ def _load_handlers_from_dir(dir_path: Path, kind: str) -> None:
             continue
         try:
             mod = importlib.util.module_from_spec(spec)
+            # Registered before execution: dataclasses, pickling and any
+            # self-import inside the handler need to find it by name.
+            sys.modules[modname] = mod
             spec.loader.exec_module(mod)
         except Exception as e:
+            sys.modules.pop(modname, None)
             print(f"agentps: failed to load {kind} handler {f}: {e}",
                   file=sys.stderr)
             continue
@@ -297,9 +301,11 @@ def detect_handler(pid: int, registry: Iterable[AgentInstance],
     exe = proc_exe(pid) or ""
     base0 = os.path.basename(cmdline[0]) if cmdline else ""
 
-    # Hardcoded daemon exclusion: the Claude rpc daemon at ~/.claude/remote/server
-    # lives under the claude tree but is not an agent.
-    if os.path.basename(exe) == "server":
+    # The Claude rpc daemon lives under the claude tree but is not an agent:
+    #   ~/.claude/remote/srv/<hash>/server --serve --socket ...
+    # Matched on the enclosing remote/ directory as well as the name, so an
+    # unrelated binary that happens to be called "server" is still inspected.
+    if os.path.basename(exe) == "server" and "/remote/" in exe:
         return None
 
     handlers = {inst.handler for inst in registry}
