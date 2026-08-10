@@ -179,7 +179,9 @@ Key actions:
 ### Claude
 
 - Scans `~/.claude/projects/`
-- Reads the recorded `cwd` from session JSONL when available
+- Reads each session's own recorded `cwd` from its JSONL. The encoded directory
+  name is lossy — `/home/u/my-proj` and `/home/u/my/proj` encode identically —
+  so it is only used for sessions that record no `cwd` of their own
 - Replays persisted permission mode on resume
 
 ### Gemini

@@ -11,7 +11,7 @@ from .actions import (copy_to_clipboard, perform_delete, resume_command_str,
 from .core import ResumeUnavailable, all_instances
 from .discovery import discover, discover_all
 from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_pid,
-                     short_session)
+                     short_session, shorten)
 
 
 _TUI_HEADER = ["AGENT", "PID", "USER", "LAST_USED", "CWD", "SESSION", "WHERE"]
@@ -36,9 +36,31 @@ def _tui_cells(r):
     ]
 
 
-def _tui_widths(rows, header):
+_CWD_COL = 4
+_MIN_CWD = 16
+_MARKER_WIDTH = 3      # focus mark, selection mark, space
+
+
+def _tui_widths(rows, header, max_width: int | None = None):
+    """Column widths, with CWD given up to whatever is left. It is the only
+    unbounded column, so without a cap one deep path pushes SESSION and WHERE
+    off the right edge."""
     cells = [header] + [_tui_cells(r) for r in rows]
-    return [max(len(row[i]) for row in cells) for i in range(len(header))]
+    widths = [max(len(row[i]) for row in cells) for i in range(len(header))]
+    if max_width:
+        used = sum(widths) + 2 * (len(widths) - 1) + _MARKER_WIDTH
+        overflow = used - max_width
+        if overflow > 0:
+            widths[_CWD_COL] = max(_MIN_CWD, widths[_CWD_COL] - overflow)
+    return widths
+
+
+def _fit(cells, widths):
+    """Shorten the cwd cell to its allotted width, keeping the tail."""
+    if len(cells[_CWD_COL]) > widths[_CWD_COL]:
+        cells = list(cells)
+        cells[_CWD_COL] = shorten(cells[_CWD_COL], widths[_CWD_COL])
+    return cells
 
 
 def _header_with_sort(sort_mode: str):
@@ -248,7 +270,7 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
     while True:
         h, w = stdscr.getmaxyx()
         header_cells = _header_with_sort(sort_mode)
-        widths = _tui_widths(rows, header_cells)
+        widths = _tui_widths(rows, header_cells, max_width=w - 1)
         line_fmt = "  ".join(f"{{:<{x}}}" for x in widths)
         view = _build_view(rows, group_mode, sort_mode, expanded)
         if refocus is not None:
@@ -298,7 +320,7 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                 else:
                     sel_mark = "+"
                 line = (focus_mark + sel_mark + " "
-                        + line_fmt.format(*cells))[: w - 1]
+                        + line_fmt.format(*_fit(cells, widths)))[: w - 1]
                 attr = curses.A_BOLD
                 if g["cwd_missing"]:
                     attr |= curses.A_DIM
@@ -311,7 +333,7 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                 is_sel = row_key(r) in selected
                 sel_mark = "*" if is_sel else " "
                 line = (focus_mark + sel_mark + " "
-                        + line_fmt.format(*_tui_cells(r)))[: w - 1]
+                        + line_fmt.format(*_fit(_tui_cells(r), widths)))[: w - 1]
                 attr = 0
                 if r.get("cwd_missing"):
                     attr |= curses.A_DIM
