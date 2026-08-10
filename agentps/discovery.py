@@ -10,7 +10,7 @@ from pathlib import Path
 from .core import AgentInstance, all_instances, detect_handler, instance_for_pid
 from .format import fmt_age
 from .proc import (parent_chain, proc_cmdline, proc_cwd, proc_starttime,
-                   proc_status, tmux_panes)
+                   proc_state, proc_status, tmux_panes)
 
 
 def _user_for_uid(uid: int) -> str:
@@ -20,17 +20,31 @@ def _user_for_uid(uid: int) -> str:
         return "?"
 
 
-def _where_from_chain(pid: int, panes: dict[int, str]) -> str:
-    for ppid, pcomm in parent_chain(pid):
+# Ancestors that only tell you a shell was involved, never who started the run.
+_TRANSPARENT_PARENTS = {
+    "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
+    "su", "sudo", "env", "nohup", "setsid", "timeout", "xargs",
+}
+
+
+def _where_from_chain(pid: int, panes: dict[int, str]) -> tuple[str, str | None]:
+    """(display, tmux_target). Falls back to naming whatever launched the agent
+    — systemd, cron, a script — because a headless run has no pane to report
+    and '-' answers nothing."""
+    chain = parent_chain(pid)
+    for ppid, pcomm in chain:
         if ppid in panes:
-            return f"tmux:{panes[ppid]}"
+            return f"tmux:{panes[ppid]}", panes[ppid]
         if pcomm.startswith("tmux"):
-            return "tmux"
+            return "tmux", None
         if pcomm in ("screen", "SCREEN"):
-            return "screen"
+            return "screen", None
         if pcomm == "sshd":
-            return "ssh"
-    return "-"
+            return "ssh", None
+    for _, pcomm in chain:
+        if pcomm and pcomm not in _TRANSPARENT_PARENTS:
+            return f"via:{pcomm}", None
+    return "-", None
 
 
 def discover(registry: list[AgentInstance] | None = None,
@@ -69,6 +83,7 @@ def discover(registry: list[AgentInstance] | None = None,
         if sess and instance:
             last_used, _ = instance.handler.session_stat(instance, str(sess))
 
+        where, pane = _where_from_chain(pid, panes)
         rows.append({
             "agent": agent_name,
             "pid": pid,
@@ -76,10 +91,12 @@ def discover(registry: list[AgentInstance] | None = None,
             "cwd": cwd or "?",
             "start": start.isoformat() if start else None,
             "age": fmt_age(start),
+            "state": proc_state(pid),
             "session": sess.name if sess else None,
             "session_path": str(sess) if sess else None,
             "last_used": last_used,
-            "where": _where_from_chain(pid, panes),
+            "where": where,
+            "pane": pane,
             "live_argv": proc_cmdline(pid) or None,
         })
         pid_to_handler[pid] = handler
@@ -181,6 +198,8 @@ def discover_all(registry: list[AgentInstance] | None = None,
             "session_path": s["session_path"],
             "last_used": s["last_used"],
             "where": "-",
+            "pane": None,
+            "state": "",
         })
 
     for r in rows:

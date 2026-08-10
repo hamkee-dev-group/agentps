@@ -6,11 +6,13 @@ import base64
 import os
 import re
 import shlex
+import signal
 import sys
 from pathlib import Path
 
 from .core import AgentInstance, ResumeUnavailable, all_instances
 from .discovery import _cwd_missing, discover, discover_all, enumerate_sessions
+from .proc import parent_chain
 
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
@@ -139,6 +141,138 @@ def resume(prefix: str, print_only: bool = False,
         print(f"failed to launch {argv[0]}: {e}", file=sys.stderr)
         return 1
     return 0  # unreachable on success
+
+
+def _self_pids() -> set[int]:
+    """This process and its ancestors. Killing them would take down the shell
+    or the very agent session the command was typed into."""
+    pids = {os.getpid()}
+    pids.update(ppid for ppid, _ in parent_chain(os.getpid()))
+    return pids
+
+
+def _live_matches(prefixes, registry):
+    """Live rows whose session id starts with one of the prefixes, or whose cwd
+    is at or under a path argument. Returns (rows, error)."""
+    live = discover(registry)
+    out: dict[int, dict] = {}
+    for arg in prefixes:
+        matched = False
+        for r in live:
+            sid = session_id(r.get("session") or "")
+            if "/" in arg:
+                base = arg.rstrip("/")
+                if not base:
+                    return [], "refusing path '/' — name a directory"
+                hit = r["cwd"] == base or r["cwd"].startswith(base + "/")
+            else:
+                hit = bool(sid and sid.startswith(arg))
+            if hit:
+                out[r["pid"]] = r
+                matched = True
+        if not matched:
+            return [], f"no live agent matching {arg!r}"
+    return list(out.values()), None
+
+
+def kill(prefixes, force: bool = False, yes: bool = False,
+         registry: list[AgentInstance] | None = None) -> int:
+    """SIGTERM (or SIGKILL with --force) every process behind the matched
+    sessions."""
+    registry = registry if registry is not None else all_instances()
+    rows, err = _live_matches(prefixes, registry)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+
+    mine = _self_pids()
+    targets: list[tuple[dict, list[int]]] = []
+    for r in rows:
+        pids = [p for p in (r.get("pids") or [r["pid"]]) if p not in mine]
+        if not pids:
+            print(f"refusing: {short_id(r)} is the session running this "
+                  f"command — exit it instead.", file=sys.stderr)
+            return 1
+        targets.append((r, pids))
+
+    total = sum(len(p) for _, p in targets)
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    print(f"Will send {sig.name} to {total} process(es) in "
+          f"{len(targets)} session(s).")
+    for r, pids in targets:
+        print(f"  {short_id(r)}  {r['agent']:10}  {r['cwd']}  "
+              f"pid {','.join(str(p) for p in pids)}")
+    if not yes:
+        try:
+            if input(f"Send {sig.name}? [y/N]: ").strip().lower() != "y":
+                print("aborted.")
+                return 0
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("aborted.")
+            return 0
+
+    signalled, errors = signal_pids([p for _, pids in targets for p in pids],
+                                    sig)
+    for e in errors:
+        print(e, file=sys.stderr)
+    print(f"signalled {signalled} process(es).")
+    return 0 if not errors else 1
+
+
+def short_id(row) -> str:
+    return session_id(row.get("session") or "") or f"pid:{row.get('pid')}"
+
+
+def signal_pids(pids, sig) -> tuple[int, list[str]]:
+    sent = 0
+    errors = []
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+            sent += 1
+        except ProcessLookupError:
+            errors.append(f"pid {pid} already gone")
+        except PermissionError:
+            errors.append(f"pid {pid}: not permitted")
+        except OSError as e:
+            errors.append(f"pid {pid}: {e}")
+    return sent, errors
+
+
+def attach(prefix: str, registry: list[AgentInstance] | None = None) -> int:
+    """Jump to the tmux pane an agent is running in."""
+    registry = registry if registry is not None else all_instances()
+    rows, err = _live_matches([prefix], registry)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    panes = [r for r in rows if r.get("pane")]
+    if not panes:
+        where = ", ".join(sorted({r.get("where") or "-" for r in rows}))
+        print(f"no tmux pane for {prefix!r} (running under: {where})",
+              file=sys.stderr)
+        return 1
+    if len({r["pane"] for r in panes}) > 1:
+        print(f"{prefix!r} matches several panes:", file=sys.stderr)
+        for r in panes:
+            print(f"  {r['pane']}  {r['agent']:10}  {r['cwd']}",
+                  file=sys.stderr)
+        return 1
+
+    target = panes[0]["pane"]
+    inside = bool(os.environ.get("TMUX"))
+    argv = ["tmux", "switch-client" if inside else "attach-session",
+            "-t", target]
+    try:
+        os.execvp(argv[0], argv)
+    except FileNotFoundError:
+        print("tmux not found", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"failed to attach: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _resolve_dupes(registry: list[AgentInstance]):

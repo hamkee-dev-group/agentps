@@ -88,6 +88,20 @@ def _btime() -> int:
     return _BTIME
 
 
+def proc_state(pid: int) -> str:
+    """Single-letter process state: R running, S sleeping, D uninterruptible,
+    T stopped, Z zombie. Empty when the process is gone."""
+    raw = _read(pid, "stat")
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", "replace")
+    rparen = text.rfind(")")
+    if rparen == -1:
+        return ""
+    fields = text[rparen + 2:].split()
+    return fields[0] if fields else ""
+
+
 def proc_starttime(pid: int):
     raw = _read(pid, "stat")
     if not raw:
@@ -106,6 +120,18 @@ def proc_starttime(pid: int):
         return datetime.fromtimestamp(_btime() + ticks / _CLK_TCK)
     except (OverflowError, OSError, ValueError, ZeroDivisionError):
         return None
+
+
+def proc_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def parent_chain(pid: int, max_depth: int = _PARENT_MAX_DEPTH):

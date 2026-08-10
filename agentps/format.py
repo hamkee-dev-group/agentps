@@ -48,6 +48,14 @@ def fmt_age(start) -> str:
     return f"{int(s // 86400)}d"
 
 
+def fmt_idle(ts) -> str:
+    """How long since the session was last written — the activity signal for an
+    agent nobody is watching."""
+    if not ts:
+        return "-"
+    return fmt_age(datetime.fromtimestamp(ts))
+
+
 def fmt_date(ts) -> str:
     if not ts:
         return "?"
