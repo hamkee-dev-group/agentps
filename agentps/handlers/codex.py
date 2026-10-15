@@ -1,17 +1,31 @@
 """OpenAI Codex CLI handler.
 
 Layout:  <config_dir>/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl
-         <config_dir>/state_5.sqlite  (threads table — used to replay flags)
+         <config_dir>/state_5.sqlite  (threads table)
+         plus thread_history_1, goals_1, queue_1, memories_*, logs_2 databases
+         and session_index.jsonl, all keyed by thread id.
 
-Resuming codex needs the original launch flags, which live in the SQLite DB.
-We read them on resume and translate back into argv.
+Resume: `codex resume <uuid>` restores the thread's model, effort and provider
+itself; passing --model or an effort override makes codex fall back to the
+current config, provider included, so neither is replayed. Permissions are
+restored by codex from 0.160 on. Before that the TUI used the current config's
+approval and sandbox, so they are replayed from the rollout's last
+turn_context, whose sandbox type uses the CLI's own mode names. The threads
+row's sandbox_policy is a permission profile ("managed", "disabled") that
+--sandbox rejects.
+
+Delete: `codex delete --force <uuid>`, which takes the thread's locks, refuses
+while a fork still references it, and clears every database above. The direct
+SQL path is kept only for when the codex binary is not available.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
-import sys
+import subprocess
 from pathlib import Path
 from typing import Iterator
 
@@ -39,58 +53,132 @@ def _meta_cwd(meta: dict) -> str | None:
     return payload.get("cwd") or payload.get("working_directory")
 
 
-def _resume_flags(db: Path, sid: str) -> list[str]:
-    if not db.exists():
-        return []
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+_CLI_TIMEOUT_S = 60
+_PERMISSIONS_RESTORED = (0, 160)   # codex restores approval/sandbox itself
+_APPROVAL_FLAG_VALUES = {"on-request", "never"}
+_SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
+# Process names that resolve to the codex binary but are tools it runs for a
+# session (sandbox launcher, patch applier), not sessions.
+_HELPER_ARGV0 = {"codex-linux-sandbox", "apply_patch", "applypatch",
+                 "codex-execve-wrapper"}
+# Subcommands that run as a process named codex without being a session. The
+# app-server daemon hosts threads for every client and its cwd is its own.
+_NON_SESSION_SUBCOMMANDS = {
+    "app-server", "exec-server", "mcp", "mcp-server", "remote-control",
+    "agents", "queue", "archive", "unarchive", "delete", "doctor", "update",
+    "features", "migrate-rollouts", "debug", "sandbox", "login", "logout",
+    "completion", "apply", "cloud",
+}
+
+# Global options that take a value, so the value is not read as a subcommand.
+_VALUE_OPTIONS = {"-c", "--config", "-m", "--model", "-p", "--profile",
+                  "-C", "--cd", "-s", "--sandbox", "-a", "--ask-for-approval",
+                  "-i", "--image", "--enable", "--disable", "--add-dir",
+                  "--remote", "--local-provider"}
+
+
+def _subcommand(argv: list[str]) -> str | None:
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            return None
+        if a in _VALUE_OPTIONS:
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        return a
+    return None
+
+
+_version_cache: dict[tuple, tuple[int, ...] | None] = {}
+
+
+def _env(instance: AgentInstance) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(instance.config_dir)
+    env.update(instance.env)
+    return env
+
+
+def _codex_version(instance: AgentInstance) -> tuple[int, ...] | None:
+    key = tuple(sorted(instance.env.items()))
+    if key not in _version_cache:
+        version = None
         try:
-            con.execute(f"PRAGMA busy_timeout = {_DB_TIMEOUT_MS};")
-            row = con.execute(
-                "SELECT model, reasoning_effort, approval_mode, sandbox_policy "
-                "FROM threads WHERE id = ?",
-                (sid,),
-            ).fetchone()
-        finally:
-            con.close()
-    except sqlite3.Error as e:
-        print(f"agentps: codex db read failed ({e}); resume flags not replayed",
-              file=sys.stderr)
+            out = subprocess.run(["codex", "--version"], capture_output=True,
+                                 text=True, timeout=10,
+                                 env=_env(instance)).stdout
+            m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+            if m:
+                version = tuple(int(x) for x in m.groups())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        _version_cache[key] = version
+    return _version_cache[key]
+
+
+def _last_turn_context(rollout: Path) -> dict:
+    last: dict = {}
+    try:
+        with open(rollout, "r", errors="replace") as f:
+            for line in f:
+                if '"turn_context"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") == "turn_context":
+                    last = obj.get("payload") or {}
+    except OSError:
+        pass
+    return last
+
+
+def _resume_flags(instance: AgentInstance, session_path: str) -> list[str]:
+    """Permission flags for codex releases that do not restore them. An
+    unknown version gets none: on a newer codex they would replace a custom
+    permission profile with a coarse mode, and dropping them never widens
+    what the agent may do."""
+    version = _codex_version(instance)
+    if version is None or version >= _PERMISSIONS_RESTORED or not session_path:
         return []
-    if not row:
-        return []
-    model, effort, approval, sandbox = row
+    ctx = _last_turn_context(Path(session_path))
     flags: list[str] = []
-    if model:
-        flags.extend(["--model", model])
-    if approval:
+    approval = ctx.get("approval_policy")
+    if approval in _APPROVAL_FLAG_VALUES:
         flags.extend(["--ask-for-approval", approval])
-    sandbox_kind = _sandbox_kind(sandbox)
-    if sandbox_kind:
-        flags.extend(["--sandbox", sandbox_kind])
-    if effort:
-        # The config key; a bare `reasoning_effort` is silently ignored.
-        flags.extend(["-c", f"model_reasoning_effort={effort}"])
+    elif isinstance(approval, str) and approval:
+        flags.extend(["-c", f"approval_policy={approval}"])
+    sandbox = ctx.get("sandbox_policy")
+    kind = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
+    if kind in _SANDBOX_MODES:
+        flags.extend(["--sandbox", kind])
     return flags
 
 
-def _sandbox_kind(value: str | None) -> str | None:
-    """sandbox_policy is stored as a JSON object like
-    {"type":"workspace-write", ...}; the CLI only accepts the bare kind
-    (read-only / workspace-write / danger-full-access). Extra fields like
-    writable_roots aren't expressible as CLI args, so we drop them — the user
-    can re-add them via config.toml or -c if needed."""
-    if not value:
-        return None
-    s = value.strip()
-    if s.startswith("{"):
+def _delete_via_sql(instance: AgentInstance, sid: str,
+                    session_path: str) -> None:
+    """Fallback when the codex binary is unavailable: the threads row, then
+    the file. Leaves the history/goal/queue databases, which only codex knows
+    how to clear consistently."""
+    db = instance.config_dir / _DB_FILE
+    if db.exists():
+        con = sqlite3.connect(str(db))
         try:
-            obj = json.loads(s)
-        except json.JSONDecodeError:
-            return None
-        kind = obj.get("type") or obj.get("mode")
-        return kind if isinstance(kind, str) else None
-    return s
+            con.execute(f"PRAGMA busy_timeout = {_DB_TIMEOUT_MS};")
+            con.execute("PRAGMA foreign_keys = ON;")
+            con.execute(
+                "DELETE FROM threads WHERE id = ? OR rollout_path = ?",
+                (sid, str(session_path)),
+            )
+            con.commit()
+        finally:
+            con.close()
+    Path(session_path).unlink()
 
 
 class CodexHandler(Handler):
@@ -135,27 +223,35 @@ class CodexHandler(Handler):
                 return p
         return None
 
+    def is_agent_process(self, argv):
+        if not argv:
+            return False
+        a0 = argv[0]
+        if os.path.basename(a0) in _HELPER_ARGV0:
+            return False
+        if "/.codex/tmp/arg0/" in a0 or "/app-server-daemon/" in a0:
+            return False
+        return _subcommand(argv) not in _NON_SESSION_SUBCOMMANDS
+
     def resume_argv(self, instance, sid, session_path, live_argv=None):
-        flags = _resume_flags(instance.config_dir / _DB_FILE, sid)
-        return ["codex", "resume", *flags, sid]
+        return ["codex", "resume", *_resume_flags(instance, session_path), sid]
 
     def delete_session(self, instance, sid, session_path):
-        """Drop the threads row first, then the file. If the DB delete fails
-        we leave the file rather than orphan a referenced row."""
-        db = instance.config_dir / _DB_FILE
-        if db.exists():
-            con = sqlite3.connect(str(db))
-            try:
-                con.execute(f"PRAGMA busy_timeout = {_DB_TIMEOUT_MS};")
-                con.execute("PRAGMA foreign_keys = ON;")
-                con.execute(
-                    "DELETE FROM threads WHERE id = ? OR rollout_path = ?",
-                    (sid, str(session_path)),
-                )
-                con.commit()
-            finally:
-                con.close()
-        Path(session_path).unlink()
+        try:
+            res = subprocess.run(["codex", "delete", "--force", sid],
+                                 capture_output=True, text=True,
+                                 timeout=_CLI_TIMEOUT_S, env=_env(instance),
+                                 stdin=subprocess.DEVNULL)
+        except FileNotFoundError:
+            _delete_via_sql(instance, sid, session_path)
+            return
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"codex delete {sid} timed out")
+        if res.returncode != 0:
+            # A refusal (e.g. a fork still references the thread) is final.
+            lines = (res.stderr or res.stdout).strip().splitlines()
+            raise RuntimeError(lines[-1] if lines else
+                               f"codex delete exited {res.returncode}")
 
 
 HANDLER = CodexHandler()
