@@ -72,6 +72,19 @@ class Handler:
                 best = s
         return Path(best["session_path"]) if best else None
 
+    def session_from_argv(self, instance: "AgentInstance",
+                          argv: list[str]) -> Path | None:
+        """The session a live process names on its own command line, if any.
+        Consulted before session_for_pid: an explicit id is exact, while the
+        cwd guess cannot tell apart two agents running in one directory."""
+        return None
+
+    def is_agent_process(self, argv: list[str]) -> bool:
+        """False for helper processes that match detection but hold no session
+        (daemons, pre-spawned spares). They would otherwise list, and be
+        killable, as agents."""
+        return True
+
     def session_stat(self, instance: "AgentInstance",
                      session_path: str) -> tuple[float | None, int | None]:
         """(last_used, owner_uid) for one session. Default: stat the artifact.
@@ -350,11 +363,21 @@ def detect_handler(pid: int, registry: Iterable[AgentInstance],
 
 
 def instance_for_pid(handler: Handler, registry: Iterable[AgentInstance],
-                     cwd: str | None, started) -> tuple[AgentInstance | None,
-                                                        Path | None]:
+                     cwd: str | None, started,
+                     argv: list[str] | None = None
+                     ) -> tuple[AgentInstance | None, Path | None]:
     """Given the handler that owns this PID, pick which AgentInstance (variant)
-    holds the live session. Falls back to the first instance with this handler
-    when no session matches the cwd."""
+    holds the live session. A session named in argv wins over the cwd guess.
+    Falls back to the first instance with this handler when no session
+    matches."""
+    registry = list(registry)
+    if argv:
+        for inst in registry:
+            if inst.handler is not handler:
+                continue
+            sess = handler.session_from_argv(inst, argv)
+            if sess is not None:
+                return inst, sess
     fallback: AgentInstance | None = None
     for inst in registry:
         if inst.handler is not handler:

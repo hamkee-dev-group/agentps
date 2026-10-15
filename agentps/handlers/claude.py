@@ -21,10 +21,20 @@ from ..core import AgentInstance, Handler, HOME, register
 _HEAD_LINES = 5
 _FLAG_HEAD_LINES = 20
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
+_SID_RE = re.compile(r"[0-9A-Fa-f-]{8,}")
 
 
 def _encode_cwd(cwd: str) -> str:
     return _NON_ALNUM.sub("-", cwd)
+
+
+def _argv_value(argv: list[str], flag: str) -> str | None:
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(flag + "="):
+            return a[len(flag) + 1:]
+    return None
 
 
 def _read_recorded_cwd(jsonl_path: Path) -> str | None:
@@ -73,7 +83,9 @@ def _resume_flags(jsonl_path: str) -> list[str]:
 
 class ClaudeHandler(Handler):
     name = "claude"
-    detect_substrings = ["claude-code"]
+    # The native installer runs ~/.local/share/claude/versions/<ver>, whose
+    # comm is the bare version number; daemon-hosted sessions run it directly.
+    detect_substrings = ["claude-code", "/claude/versions/"]
 
     def default_dirs(self, base: Path | None = None):
         config_dir = base or (HOME / ".claude")
@@ -102,6 +114,23 @@ class ClaudeHandler(Handler):
                     "cwd": _read_recorded_cwd(jf) or fallback,
                     "last_used": m,
                 }
+
+    def is_agent_process(self, argv):
+        # The background daemon and its pre-spawned spare hold no session.
+        if len(argv) > 1 and argv[1] == "daemon":
+            return False
+        return "--bg-spare" not in argv
+
+    def session_from_argv(self, instance, argv):
+        """`--session-id` names the file exactly. Headless runs, daemon-hosted
+        sessions and wrappers pass it, often several to one directory, where
+        the freshest-file guess would hand them all the same session."""
+        sid = _argv_value(argv, "--session-id")
+        if not sid or not _SID_RE.fullmatch(sid):
+            return None
+        if not instance.sessions_dir.is_dir():
+            return None
+        return next(instance.sessions_dir.glob(f"*/{sid}.jsonl"), None)
 
     def session_for_pid(self, instance, cwd, started):
         if not cwd:

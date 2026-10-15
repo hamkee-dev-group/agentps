@@ -63,6 +63,9 @@ def discover(registry: list[AgentInstance] | None = None,
         handler = detect_handler(pid, registry, loose=loose)
         if handler is None:
             continue
+        argv = proc_cmdline(pid)
+        if not handler.is_agent_process(argv):
+            continue
 
         cwd = proc_cwd(pid)
         start = proc_starttime(pid)
@@ -77,7 +80,8 @@ def discover(registry: list[AgentInstance] | None = None,
         except ValueError:
             ppid = 0
 
-        instance, sess = instance_for_pid(handler, registry, cwd, start)
+        instance, sess = instance_for_pid(handler, registry, cwd, start,
+                                          argv=argv)
         agent_name = instance.name if instance else handler.name
         last_used = None
         if sess and instance:
@@ -97,7 +101,7 @@ def discover(registry: list[AgentInstance] | None = None,
             "last_used": last_used,
             "where": where,
             "pane": pane,
-            "live_argv": proc_cmdline(pid) or None,
+            "live_argv": argv or None,
         })
         pid_to_handler[pid] = handler
         pid_to_ppid[pid] = ppid
