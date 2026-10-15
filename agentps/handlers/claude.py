@@ -1,7 +1,8 @@
 """Claude Code handler.
 
 Layout:  <config_dir>/projects/<encoded-cwd>/<sid>.jsonl
-         where <encoded-cwd> is cwd with `/` replaced by `-` (lossy).
+         where <encoded-cwd> is cwd with every non-alphanumeric character
+         replaced by `-` (lossy: `/home/u/.cfg` -> `-home-u--cfg`).
 
 The first few lines of each .jsonl carry a top-level `cwd` field; we use that
 to disambiguate when the encoded dir is ambiguous.
@@ -10,6 +11,7 @@ to disambiguate when the encoded dir is ambiguous.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Iterator
 
@@ -18,6 +20,11 @@ from ..core import AgentInstance, Handler, HOME, register
 
 _HEAD_LINES = 5
 _FLAG_HEAD_LINES = 20
+_NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
+
+
+def _encode_cwd(cwd: str) -> str:
+    return _NON_ALNUM.sub("-", cwd)
 
 
 def _read_recorded_cwd(jsonl_path: Path) -> str | None:
@@ -99,10 +106,11 @@ class ClaudeHandler(Handler):
     def session_for_pid(self, instance, cwd, started):
         if not cwd:
             return None
-        encoded = cwd.replace("/", "-")
-        pdir = instance.sessions_dir / encoded
+        pdir = instance.sessions_dir / _encode_cwd(cwd)
         if not pdir.is_dir():
-            return None
+            # Very long paths are truncated and hashed by claude; match on the
+            # cwd each session records instead.
+            return super().session_for_pid(instance, cwd, started)
         candidates = []
         for p in pdir.glob("*.jsonl"):
             try:
