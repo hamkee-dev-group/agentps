@@ -102,7 +102,9 @@ def proc_state(pid: int) -> str:
     return fields[0] if fields else ""
 
 
-def proc_starttime(pid: int):
+def proc_start_ticks(pid: int) -> int | None:
+    """Start time in clock ticks since boot. Together with the PID it names one
+    process: a reused PID gets a different value."""
     raw = _read(pid, "stat")
     if not raw:
         return None
@@ -113,8 +115,14 @@ def proc_starttime(pid: int):
     fields = text[rparen + 2:].split()
     # After stripping `pid (comm) `, starttime is field index 19
     try:
-        ticks = int(fields[19])
+        return int(fields[19])
     except (IndexError, ValueError):
+        return None
+
+
+def proc_starttime(pid: int):
+    ticks = proc_start_ticks(pid)
+    if ticks is None:
         return None
     try:
         return datetime.fromtimestamp(_btime() + ticks / _CLK_TCK)

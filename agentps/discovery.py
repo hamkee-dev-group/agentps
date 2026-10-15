@@ -9,8 +9,8 @@ from pathlib import Path
 
 from .core import AgentInstance, all_instances, detect_handler, instance_for_pid
 from .format import fmt_age
-from .proc import (parent_chain, proc_cmdline, proc_cwd, proc_starttime,
-                   proc_state, proc_status, tmux_panes)
+from .proc import (parent_chain, proc_cmdline, proc_cwd, proc_start_ticks,
+                   proc_starttime, proc_state, proc_status, tmux_panes)
 
 
 def _user_for_uid(uid: int) -> str:
@@ -102,6 +102,7 @@ def discover(registry: list[AgentInstance] | None = None,
             "where": where,
             "pane": pane,
             "live_argv": argv or None,
+            "start_ticks": proc_start_ticks(pid),
         })
         pid_to_handler[pid] = handler
         pid_to_ppid[pid] = ppid
@@ -147,6 +148,7 @@ def _merge_by_session(rows: list[dict]) -> list[dict]:
     # same process — its cwd, tmux pane and cmdline stay consistent.
     for r in sorted(rows, key=lambda r: r["pid"]):
         key = r.get("session_path")
+        r["pid_ticks"] = {r["pid"]: r.pop("start_ticks", None)}
         if not key:
             r["pids"] = [r["pid"]]
             out.append(r)
@@ -158,6 +160,7 @@ def _merge_by_session(rows: list[dict]) -> list[dict]:
             out.append(r)
         else:
             first["pids"].append(r["pid"])
+            first["pid_ticks"].update(r["pid_ticks"])
             first["state"] = _busiest(first.get("state"), r.get("state"))
     for r in out:
         r["pids"].sort()

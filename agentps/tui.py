@@ -8,7 +8,8 @@ import signal
 import sys
 
 from .actions import (_self_pids, copy_to_clipboard, perform_delete,
-                      resume_command_str, session_id, signal_pids)
+                      resume_command_str, row_ticks, session_id,
+                      signal_pids)
 from .core import ResumeUnavailable, all_instances
 from .discovery import discover, discover_all
 from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_idle, fmt_pid,
@@ -511,7 +512,8 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                             f"{len(live_rows)} session(s)? [y/N]"):
                 msg = "kill aborted"
                 continue
-            sent, gone, errors = signal_pids(pids, signal.SIGTERM)
+            sent, gone, errors = signal_pids(
+                pids, signal.SIGTERM, expected_ticks=row_ticks(live_rows))
             refresh()
             selected.clear()
             msg = f"signalled {sent}"

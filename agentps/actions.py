@@ -11,7 +11,7 @@ import sys
 
 from .core import AgentInstance, ResumeUnavailable, all_instances
 from .discovery import _cwd_missing, discover, discover_all, enumerate_sessions
-from .proc import parent_chain
+from .proc import parent_chain, proc_start_ticks
 
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
@@ -223,7 +223,8 @@ def kill(prefixes, force: bool = False, yes: bool = False,
             return 0
 
     signalled, gone, errors = signal_pids(
-        [p for _, pids in targets for p in pids], sig)
+        [p for _, pids in targets for p in pids], sig,
+        expected_ticks=row_ticks(r for r, _ in targets))
     for e in errors:
         print(e, file=sys.stderr)
     note = f", {gone} had already exited" if gone else ""
@@ -235,14 +236,32 @@ def short_id(row) -> str:
     return session_id(row.get("session") or "") or f"pid:{row.get('pid')}"
 
 
-def signal_pids(pids, sig) -> tuple[int, int, list[str]]:
+def row_ticks(rows) -> dict[int, int | None]:
+    """{pid: start ticks} recorded when the rows were discovered."""
+    out: dict[int, int | None] = {}
+    for r in rows:
+        out.update(r.get("pid_ticks") or {})
+    return out
+
+
+def signal_pids(pids, sig, expected_ticks: dict | None = None
+                ) -> tuple[int, int, list[str]]:
     """(signalled, already_gone, errors). A process that exits between listing
     and signalling is not a failure — the state the caller wanted is the state
-    it got — so it is counted separately and never fails the command."""
+    it got — so it is counted separately and never fails the command.
+
+    `expected_ticks` holds each PID's start time as seen at listing. Time passes
+    at the confirmation prompt (and between TUI refreshes), long enough for the
+    agent to exit and its PID to go to an unrelated process, so a PID whose
+    start time no longer matches is treated as gone and left alone."""
     sent = 0
     gone = 0
     errors = []
     for pid in pids:
+        want = (expected_ticks or {}).get(pid)
+        if want is not None and proc_start_ticks(pid) != want:
+            gone += 1
+            continue
         try:
             os.kill(pid, sig)
             sent += 1
