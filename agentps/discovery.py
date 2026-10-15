@@ -32,6 +32,10 @@ def _where_from_chain(pid: int, panes: dict[int, str]) -> tuple[str, str | None]
     """(display, tmux_target). Falls back to naming whatever launched the agent
     — systemd, cron, a script — because a headless run has no pane to report
     and '-' answers nothing."""
+    # An agent started as the pane's own command (`tmux new-window claude`) is
+    # the pane process itself, so it never appears among its ancestors.
+    if pid in panes:
+        return f"tmux:{panes[pid]}", panes[pid]
     chain = parent_chain(pid)
     for ppid, pcomm in chain:
         if ppid in panes:
