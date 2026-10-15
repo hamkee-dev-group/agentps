@@ -86,13 +86,17 @@ def discover(registry: list[AgentInstance] | None = None,
             ppid = 0
 
         instance, sess = instance_for_pid(handler, registry, cwd, start,
-                                          argv=argv)
+                                          pid=pid, argv=argv)
         agent_name = instance.name if instance else handler.name
         last_used = None
         if sess and instance:
             last_used, _ = instance.handler.session_stat(instance, str(sess))
 
+        details = (instance.handler.live_details(instance, pid)
+                   if instance else {})
         where, pane = _where_from_chain(pid, panes)
+        if details.get("bg_id") and not pane:
+            where = f"bg:{details['bg_id']}"
         rows.append({
             "agent": agent_name,
             "pid": pid,
@@ -108,6 +112,7 @@ def discover(registry: list[AgentInstance] | None = None,
             "pane": pane,
             "live_argv": argv or None,
             "start_ticks": proc_start_ticks(pid),
+            **details,
         })
         pid_to_handler[pid] = handler
         pid_to_ppid[pid] = ppid
@@ -167,6 +172,14 @@ def _merge_by_session(rows: list[dict]) -> list[dict]:
             first["pids"].append(r["pid"])
             first["pid_ticks"].update(r["pid_ticks"])
             first["state"] = _busiest(first.get("state"), r.get("state"))
+            # Details may come from any process of the session: a background
+            # claude session's registry entry is the worker's, while the row
+            # kept is its lower-numbered pty host.
+            for k in ("bg_id", "name"):
+                if r.get(k) and not first.get(k):
+                    first[k] = r[k]
+            if first.get("bg_id") and not first.get("pane"):
+                first["where"] = f"bg:{first['bg_id']}"
     for r in out:
         r["pids"].sort()
         r["pid"] = r["pids"][0]

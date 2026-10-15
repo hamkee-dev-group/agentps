@@ -72,11 +72,31 @@ class Handler:
                 best = s
         return Path(best["session_path"]) if best else None
 
-    def session_from_argv(self, instance: "AgentInstance",
-                          argv: list[str]) -> Path | None:
-        """The session a live process names on its own command line, if any.
-        Consulted before session_for_pid: an explicit id is exact, while the
-        cwd guess cannot tell apart two agents running in one directory."""
+    def session_from_process(self, instance: "AgentInstance", pid: int,
+                             argv: list[str]) -> Path | None:
+        """The session this live process is known to hold, from its command
+        line or a registry the agent keeps. Consulted before session_for_pid:
+        an exact answer beats the cwd guess, which cannot tell apart two agents
+        running in one directory."""
+        return None
+
+    def live_details(self, instance: "AgentInstance", pid: int) -> dict:
+        """Extra facts about a live process, merged into its row. Keys the rest
+        of agentps understands: `bg_id` (a background session the agent's own
+        tooling addresses by this id) and `name`."""
+        return {}
+
+    def open_live_argv(self, instance: "AgentInstance",
+                       row: dict) -> list[str] | None:
+        """argv that opens a session while it is running elsewhere, such as an
+        agent's own attach command. None when there is no such command; a
+        plain resume of a running session would start a second writer."""
+        return None
+
+    def stop_argv(self, instance: "AgentInstance",
+                  row: dict) -> list[str] | None:
+        """argv that stops a running session through the agent itself, used by
+        `kill` instead of a signal. None to signal the processes directly."""
         return None
 
     def is_agent_process(self, argv: list[str]) -> bool:
@@ -363,19 +383,19 @@ def detect_handler(pid: int, registry: Iterable[AgentInstance],
 
 
 def instance_for_pid(handler: Handler, registry: Iterable[AgentInstance],
-                     cwd: str | None, started,
+                     cwd: str | None, started, pid: int | None = None,
                      argv: list[str] | None = None
                      ) -> tuple[AgentInstance | None, Path | None]:
     """Given the handler that owns this PID, pick which AgentInstance (variant)
-    holds the live session. A session named in argv wins over the cwd guess.
-    Falls back to the first instance with this handler when no session
-    matches."""
+    holds the live session. A session the process is known to hold wins over
+    the cwd guess. Falls back to the first instance with this handler when no
+    session matches."""
     registry = list(registry)
-    if argv:
+    if pid is not None:
         for inst in registry:
             if inst.handler is not handler:
                 continue
-            sess = handler.session_from_argv(inst, argv)
+            sess = handler.session_from_process(inst, pid, argv or [])
             if sess is not None:
                 return inst, sess
     fallback: AgentInstance | None = None

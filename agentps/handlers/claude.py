@@ -6,22 +6,36 @@ Layout:  <config_dir>/projects/<encoded-cwd>/<sid>.jsonl
 
 The first few lines of each .jsonl carry a top-level `cwd` field; we use that
 to disambiguate when the encoded dir is ambiguous.
+
+Live processes: <config_dir>/sessions/<pid>.json is claude's own registry of
+running sessions (sessionId, cwd, kind, background job id, procStart). It is
+exact, so it is read before any guessing. Background sessions (`claude --bg`,
+or agents launched from another session) run under claude's daemon; they are
+opened with `claude attach <id>` and stopped with `claude stop <id>`, since
+`claude --resume` refuses a session that is still running.
+
+Per-session data beside the transcript, all keyed by the full session id:
+<projects>/<enc>/<sid>/ (subagents, tool results), file-history/<sid>,
+session-env/<sid>, tasks/<sid>, todos/<sid>*.json, and for a background
+session jobs/<id>/.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Iterator
 
 from ..core import AgentInstance, Handler, HOME, register
+from ..proc import proc_start_ticks
 
 
 _HEAD_LINES = 5
 _FLAG_HEAD_LINES = 20
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
-_SID_RE = re.compile(r"[0-9A-Fa-f-]{8,}")
+_SID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 
 def _encode_cwd(cwd: str) -> str:
@@ -121,16 +135,97 @@ class ClaudeHandler(Handler):
             return False
         return "--bg-spare" not in argv
 
-    def session_from_argv(self, instance, argv):
-        """`--session-id` names the file exactly. Headless runs, daemon-hosted
-        sessions and wrappers pass it, often several to one directory, where
-        the freshest-file guess would hand them all the same session."""
-        sid = _argv_value(argv, "--session-id")
-        if not sid or not _SID_RE.fullmatch(sid):
+    def _registry(self, instance, pid) -> dict:
+        """claude's entry for this pid, if it is about this very process. The
+        file outlives a crash, so the recorded start time must match or a
+        reused pid would inherit a dead session."""
+        try:
+            entry = json.loads(
+                (instance.config_dir / "sessions" / f"{pid}.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(entry, dict):
+            return {}
+        if str(entry.get("procStart")) != str(proc_start_ticks(pid)):
+            return {}
+        return entry
+
+    def _transcript(self, instance, sid, cwd=None) -> Path | None:
+        if not _SID_RE.fullmatch(sid or ""):
             return None
-        if not instance.sessions_dir.is_dir():
-            return None
-        return next(instance.sessions_dir.glob(f"*/{sid}.jsonl"), None)
+        if cwd:
+            p = instance.sessions_dir / _encode_cwd(cwd) / f"{sid}.jsonl"
+            if p.exists():
+                return p
+        if instance.sessions_dir.is_dir():
+            found = next(instance.sessions_dir.glob(f"*/{sid}.jsonl"), None)
+            if found:
+                return found
+        # Not written yet (no message sent); still this session, not another.
+        if cwd:
+            return instance.sessions_dir / _encode_cwd(cwd) / f"{sid}.jsonl"
+        return None
+
+    def session_from_process(self, instance, pid, argv):
+        """claude's registry first, then `--session-id` on the command line
+        (headless runs and the pty host of a background session pass it). Both
+        are exact; the freshest-file guess would hand every agent in one
+        directory the same session."""
+        entry = self._registry(instance, pid)
+        if entry.get("sessionId"):
+            return self._transcript(instance, entry["sessionId"],
+                                    entry.get("cwd"))
+        return self._transcript(instance, _argv_value(argv, "--session-id"))
+
+    def live_details(self, instance, pid):
+        entry = self._registry(instance, pid)
+        out = {}
+        if entry.get("kind") == "bg" and entry.get("jobId"):
+            out["bg_id"] = str(entry["jobId"])
+        if entry.get("name"):
+            out["name"] = str(entry["name"])
+        return out
+
+    def open_live_argv(self, instance, row):
+        if row.get("bg_id"):
+            return ["claude", "attach", row["bg_id"]]
+        return None
+
+    def stop_argv(self, instance, row):
+        # A signal leaves the daemon to discover a dead worker; `claude stop`
+        # keeps the conversation resumable and the job record consistent.
+        if row.get("bg_id"):
+            return ["claude", "stop", row["bg_id"]]
+        return None
+
+    def delete_session(self, instance, sid, session_path):
+        p = Path(session_path)
+        full = p.stem
+        p.unlink()
+        if not _SID_RE.fullmatch(full):
+            return
+        cfg = instance.config_dir
+        for d in (p.with_suffix(""), cfg / "file-history" / full,
+                  cfg / "session-env" / full, cfg / "tasks" / full):
+            shutil.rmtree(d, ignore_errors=True)
+        for f in (cfg / "todos").glob(f"{full}*.json"):
+            f.unlink(missing_ok=True)
+        self._delete_job(cfg / "jobs", full)
+
+    def _delete_job(self, jobs: Path, full: str) -> None:
+        """The background job record, only when it belongs to this session
+        and owns no worktree: a worktree may hold uncommitted work, and
+        `claude rm` is the tool that knows when removing one is safe."""
+        job = jobs / full[:8]
+        try:
+            state = json.loads((job / "state.json").read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(state, dict) or state.get("sessionId") != full:
+            return
+        if state.get("worktree") or state.get("bgIsolation") not in (None, "none"):
+            return
+        shutil.rmtree(job, ignore_errors=True)
 
     def session_for_pid(self, instance, cwd, started):
         if not cwd:

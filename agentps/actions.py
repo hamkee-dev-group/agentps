@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import signal
+import subprocess
 import sys
 
 from .core import AgentInstance, ResumeUnavailable, all_instances
@@ -118,34 +119,42 @@ def resume(prefix: str, print_only: bool = False,
             print(f"  {sid}  {s['agent']:10}  {s['cwd']}", file=sys.stderr)
         return 1
     sid, s = matches[0]
-    instance = _instance_by_name(registry, s["agent"])
-    if instance is None:
-        print(f"no handler for agent {s['agent']!r}", file=sys.stderr)
-        return 1
+    return open_row(s, sid, registry, print_only=print_only)
 
-    cwd = s["cwd"] if s["cwd"] != "?" else "."
-    session_path = s.get("session_path") or ""
-    live_argv = s.get("live_argv")
-    try:
-        argv = resume_argv(instance, sid, session_path, live_argv=live_argv)
-        if print_only:
-            line = resume_command_str(instance, sid, session_path, cwd,
-                                      live_argv=live_argv)
-    except ResumeUnavailable as e:
-        print(f"agentps: {e}", file=sys.stderr)
-        return 1
 
-    if print_only:
-        print(f"({line})")
-        return 0
+def _env_prefix(instance: AgentInstance) -> str:
+    return "".join(f"{k}={shlex.quote(v)} " for k, v in instance.env.items())
 
-    try:
-        os.chdir(cwd)
-    except OSError as e:
-        print(f"cannot cd to {cwd}: {e}", file=sys.stderr)
-        return 1
+
+def _tmux_argv(pane: str) -> list[str]:
+    inside = bool(os.environ.get("TMUX"))
+    return ["tmux", "switch-client" if inside else "attach-session",
+            "-t", pane]
+
+
+def live_open_argv(instance: AgentInstance, row: dict) -> list[str] | None:
+    """How to reach a session that is running right now: the agent's own
+    attach command, else the tmux pane it runs in. None when neither exists."""
+    if not row.get("pid"):
+        return None
+    argv = instance.handler.open_live_argv(instance, row)
+    if argv:
+        return argv
+    if row.get("pane"):
+        return _tmux_argv(row["pane"])
+    return None
+
+
+def _exec(argv: list[str], env_extra: dict[str, str],
+          cwd: str | None = None) -> int:
+    if cwd is not None:
+        try:
+            os.chdir(cwd)
+        except OSError as e:
+            print(f"cannot cd to {cwd}: {e}", file=sys.stderr)
+            return 1
     env = os.environ.copy()
-    env.update(instance.env)
+    env.update(env_extra)
     try:
         os.execvpe(argv[0], argv, env)
     except FileNotFoundError:
@@ -155,6 +164,46 @@ def resume(prefix: str, print_only: bool = False,
         print(f"failed to launch {argv[0]}: {e}", file=sys.stderr)
         return 1
     return 0  # unreachable on success
+
+
+def open_row(row: dict, sid: str, registry: list[AgentInstance],
+             print_only: bool = False) -> int:
+    """Open one session: join it if it is running, else resume it from its
+    recorded cwd. A running session is never resumed a second time when there
+    is a way to join it — two processes writing one session corrupt it, and
+    some agents refuse outright (claude for a background session)."""
+    instance = _instance_by_name(registry, row["agent"])
+    if instance is None:
+        print(f"no handler for agent {row['agent']!r}", file=sys.stderr)
+        return 1
+
+    live = live_open_argv(instance, row)
+    if live:
+        if print_only:
+            print(_env_prefix(instance)
+                  + " ".join(shlex.quote(a) for a in live))
+            return 0
+        return _exec(live, instance.env)
+    if row.get("pid"):
+        print(f"agentps: {sid} is already running (pid {row['pid']}, "
+              f"{row.get('where') or '-'}); resuming opens a second process "
+              f"on it.", file=sys.stderr)
+
+    cwd = row["cwd"] if row["cwd"] != "?" else "."
+    session_path = row.get("session_path") or ""
+    live_argv = row.get("live_argv")
+    try:
+        argv = resume_argv(instance, sid, session_path, live_argv=live_argv)
+        if print_only:
+            line = resume_command_str(instance, sid, session_path, cwd,
+                                      live_argv=live_argv)
+    except ResumeUnavailable as e:
+        print(f"agentps: {e}", file=sys.stderr)
+        return 1
+    if print_only:
+        print(f"({line})")
+        return 0
+    return _exec(argv, instance.env, cwd)
 
 
 def _self_pids() -> set[int]:
@@ -219,16 +268,16 @@ def kill(prefixes, force: bool = False, yes: bool = False,
             return 1
         targets.append((r, pids))
 
-    total = sum(len(p) for _, p in targets)
     sig = signal.SIGKILL if force else signal.SIGTERM
-    print(f"Will send {sig.name} to {total} process(es) in "
-          f"{len(targets)} session(s).")
-    for r, pids in targets:
-        print(f"  {short_id(r)}  {r['agent']:10}  {r['cwd']}  "
-              f"pid {','.join(str(p) for p in pids)}")
+    plan = stop_plan(targets, registry, use_agent=not force)
+    print(f"Will stop {len(plan)} session(s).")
+    for r, pids, argv in plan:
+        how = (" ".join(argv) if argv
+               else f"{sig.name} pid {','.join(str(p) for p in pids)}")
+        print(f"  {short_id(r)}  {r['agent']:10}  {r['cwd']}  {how}")
     if not yes:
         try:
-            if input(f"Send {sig.name}? [y/N]: ").strip().lower() != "y":
+            if input("Proceed? [y/N]: ").strip().lower() != "y":
                 print("aborted.")
                 return 0
         except (EOFError, KeyboardInterrupt):
@@ -236,14 +285,61 @@ def kill(prefixes, force: bool = False, yes: bool = False,
             print("aborted.")
             return 0
 
-    signalled, gone, errors = signal_pids(
-        [p for _, pids in targets for p in pids], sig,
-        expected_ticks=row_ticks(r for r, _ in targets))
+    stopped, signalled, gone, errors = run_stop_plan(plan, sig)
     for e in errors:
         print(e, file=sys.stderr)
-    note = f", {gone} had already exited" if gone else ""
-    print(f"signalled {signalled} process(es){note}.")
+    parts = []
+    if stopped:
+        parts.append(f"stopped {stopped} session(s) via the agent")
+    parts.append(f"signalled {signalled} process(es)")
+    if gone:
+        parts.append(f"{gone} had already exited")
+    print(", ".join(parts) + ".")
     return 0 if not errors else 1
+
+
+def stop_plan(targets, registry, use_agent: bool = True):
+    """[(row, pids, argv-or-None)]: the agent's own stop command where it has
+    one (and use_agent), else the pids to signal."""
+    plan = []
+    for r, pids in targets:
+        argv = None
+        if use_agent:
+            inst = _instance_by_name(registry, r["agent"])
+            if inst is not None:
+                argv = inst.handler.stop_argv(inst, r)
+        plan.append((r, pids, argv))
+    return plan
+
+
+_STOP_TIMEOUT_S = 30
+
+
+def run_stop_plan(plan, sig) -> tuple[int, int, int, list[str]]:
+    """(stopped_via_agent, signalled, already_gone, errors)."""
+    stopped = 0
+    errors: list[str] = []
+    signal_rows = []
+    for r, pids, argv in plan:
+        if not argv:
+            signal_rows.append((r, pids))
+            continue
+        try:
+            res = subprocess.run(argv, capture_output=True, text=True,
+                                 timeout=_STOP_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            errors.append(f"{' '.join(argv)}: {e}")
+            continue
+        if res.returncode == 0:
+            stopped += 1
+        else:
+            msg = (res.stderr or res.stdout).strip().splitlines()
+            errors.append(f"{' '.join(argv)}: "
+                          f"{msg[-1] if msg else f'exit {res.returncode}'}")
+    signalled, gone, sig_errors = signal_pids(
+        [p for _, pids in signal_rows for p in pids], sig,
+        expected_ticks=row_ticks(r for r, _ in signal_rows))
+    return stopped, signalled, gone, errors + sig_errors
 
 
 def short_id(row) -> str:
@@ -289,13 +385,19 @@ def signal_pids(pids, sig, expected_ticks: dict | None = None
 
 
 def attach(prefix: str, registry: list[AgentInstance] | None = None) -> int:
-    """Jump to the tmux pane an agent is running in."""
+    """Jump to the tmux pane an agent is running in, or join it through the
+    agent's own attach command (claude background sessions have no pane)."""
     registry = registry if registry is not None else all_instances()
     rows, err = _live_matches([prefix], registry)
     if err:
         print(err, file=sys.stderr)
         return 1
     panes = [r for r in rows if r.get("pane")]
+    if not panes and len(rows) == 1:
+        inst = _instance_by_name(registry, rows[0]["agent"])
+        argv = inst and inst.handler.open_live_argv(inst, rows[0])
+        if argv:
+            return _exec(argv, inst.env)
     if not panes:
         where = ", ".join(sorted({r.get("where") or "-" for r in rows}))
         print(f"no tmux pane for {prefix!r} (running under: {where})",
@@ -308,19 +410,7 @@ def attach(prefix: str, registry: list[AgentInstance] | None = None) -> int:
                   file=sys.stderr)
         return 1
 
-    target = panes[0]["pane"]
-    inside = bool(os.environ.get("TMUX"))
-    argv = ["tmux", "switch-client" if inside else "attach-session",
-            "-t", target]
-    try:
-        os.execvp(argv[0], argv)
-    except FileNotFoundError:
-        print("tmux not found", file=sys.stderr)
-        return 1
-    except OSError as e:
-        print(f"failed to attach: {e}", file=sys.stderr)
-        return 1
-    return 0
+    return _exec(_tmux_argv(panes[0]["pane"]), {})
 
 
 def _resolve_dupes(registry: list[AgentInstance]):

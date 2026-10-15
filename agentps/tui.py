@@ -4,12 +4,14 @@ fallbacks). Pure presentation — no agent-specific logic."""
 from __future__ import annotations
 
 import curses
+import shlex
 import signal
 import sys
 
-from .actions import (_self_pids, copy_to_clipboard, perform_delete,
-                      resume_command_str, row_ticks, session_id,
-                      signal_pids)
+from .actions import (_instance_by_name, _self_pids, copy_to_clipboard,
+                      live_open_argv, open_row, perform_delete,
+                      resume_command_str, run_stop_plan, session_id,
+                      stop_plan)
 from .core import ResumeUnavailable, all_instances
 from .discovery import discover, discover_all
 from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_idle, fmt_pid,
@@ -94,10 +96,10 @@ def _tui_help(stdscr, delay: float) -> None:
         "                       on a group header: marks all children",
         "",
         "  Actions",
-        "    Enter / o          open session, or expand/collapse a group",
-        "    a                  switch to the tmux pane the agent runs in",
+        "    Enter / o          open session (joins it if running), or expand/collapse a group",
+        "    a                  join a running session: its tmux pane or the agent's attach",
         "    c                  copy resume command for focused session (OSC52)",
-        "    K                  SIGTERM the process(es) behind the session",
+        "    K                  stop the session (agent's own stop command, else SIGTERM)",
         "    d                  delete focused or marked session(s)",
         "                       on a group header: deletes the entire group",
         "",
@@ -439,12 +441,14 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                             msg = f"no handler for {r['agent']!r}"
                         else:
                             cwd = r["cwd"] if r["cwd"] != "?" else "."
+                            join = live_open_argv(instance, r)
                             try:
-                                cmd = resume_command_str(
-                                    instance, sid,
-                                    r.get("session_path") or "", cwd,
-                                    live_argv=r.get("live_argv"),
-                                )
+                                cmd = (" ".join(shlex.quote(a) for a in join)
+                                       if join else resume_command_str(
+                                           instance, sid,
+                                           r.get("session_path") or "", cwd,
+                                           live_argv=r.get("live_argv"),
+                                       ))
                             except ResumeUnavailable as e:
                                 msg = str(e)
                             else:
@@ -502,29 +506,38 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
                 msg = "no running process on the selected row(s)"
                 continue
             mine = _self_pids()
-            pids = [p for r in live_rows for p in (r.get("pids") or [r["pid"]])
-                    if p not in mine]
-            if not pids:
+            targets = []
+            for r in live_rows:
+                pids = [p for p in (r.get("pids") or [r["pid"]])
+                        if p not in mine]
+                if pids:
+                    targets.append((r, pids))
+            if not targets:
                 msg = "that is the session running agentps — exit it instead"
                 continue
             if not _tui_confirm(
-                    stdscr, f"Send SIGTERM to {len(pids)} process(es) in "
-                            f"{len(live_rows)} session(s)? [y/N]"):
+                    stdscr, f"Stop {len(targets)} session(s)? [y/N]"):
                 msg = "kill aborted"
                 continue
-            sent, gone, errors = signal_pids(
-                pids, signal.SIGTERM, expected_ticks=row_ticks(live_rows))
+            stopped, sent, gone, errors = run_stop_plan(
+                stop_plan(targets, registry), signal.SIGTERM)
             refresh()
             selected.clear()
-            msg = f"signalled {sent}"
+            parts = []
+            if stopped:
+                parts.append(f"stopped {stopped}")
+            if sent or not stopped:
+                parts.append(f"signalled {sent}")
             if gone:
-                msg += f", {gone} already gone"
+                parts.append(f"{gone} already gone")
             if errors:
-                msg += f", {len(errors)} error(s)"
+                parts.append(f"{len(errors)} error(s): {errors[0]}")
+            msg = ", ".join(parts)
         elif ch == ord("a"):
             if 0 <= focus < len(view) and view[focus][0] != "group":
                 r = rows[view[focus][1]]
-                if r.get("pane"):
+                inst = _instance_by_name(registry, r["agent"])
+                if inst and live_open_argv(inst, r):
                     return ("attach", r)
                 msg = f"no tmux pane for this session (running under: " \
                       f"{r.get('where') or '-'})"
@@ -545,8 +558,6 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
 
 
 def tui(delay: float = 60.0, sort_default: str = "date", registry=None) -> int:
-    import os
-
     if registry is None:
         registry = all_instances()
     try:
@@ -570,32 +581,5 @@ def tui(delay: float = 60.0, sort_default: str = "date", registry=None) -> int:
         if not sid:
             print("focused row has no session id", file=sys.stderr)
             return 1
-        instance = next((i for i in registry if i.name == row["agent"]), None)
-        if instance is None:
-            print(f"no handler for {row['agent']!r}", file=sys.stderr)
-            return 1
-        cwd = row["cwd"] if row["cwd"] != "?" else "."
-        try:
-            argv = instance.handler.resume_argv(
-                instance, sid, row.get("session_path") or "",
-                live_argv=row.get("live_argv"),
-            )
-        except ResumeUnavailable as e:
-            print(f"agentps: {e}", file=sys.stderr)
-            return 1
-        env = os.environ.copy()
-        env.update(instance.env)
-        try:
-            os.chdir(cwd)
-        except OSError as e:
-            print(f"cannot cd to {cwd}: {e}", file=sys.stderr)
-            return 1
-        try:
-            os.execvpe(argv[0], argv, env)
-        except FileNotFoundError:
-            print(f"command not found: {argv[0]}", file=sys.stderr)
-            return 1
-        except OSError as e:
-            print(f"failed to launch {argv[0]}: {e}", file=sys.stderr)
-            return 1
+        return open_row(row, sid, registry)
     return 0
