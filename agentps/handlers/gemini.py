@@ -7,13 +7,13 @@ Multiple .jsonl files can carry the same `sessionId` inside (gemini snapshots
 the session per-resume). We dedupe by inner sessionId, keeping the freshest
 file.
 
-Resume:  gemini -r <index>      (1-based, position within unique sessions
-                                 in the project, newest-first)
+Resume:  gemini --resume <sessionId>
 
-gemini has no resume-by-id: `-r` takes "latest" or a position, so the index is
-only valid for as long as the ordering holds. agentps resolves it immediately
-before launching, and hands out `agentps resume <id>` for commands that get
-copied or printed, so they re-resolve wherever they are eventually pasted.
+`--resume` matches a full session UUID before trying it as a number, in every
+release since at least 0.41 (findSession in the bundled core), even though
+`--help` only mentions numbers. Numbers are positions counted oldest-first by
+the startTime inside each file, so they shift as sessions come and go; the
+UUID never does, and the command stays valid wherever it is pasted.
 
 Yolo / approval-mode aren't persisted in the session file — they're purely
 launch flags. If a live process is running we read its cmdline and replay
@@ -100,10 +100,10 @@ def _preserve_flags(live_argv: list[str]) -> list[str]:
 
 
 def _resume_selector(sid: str, session_path: str) -> list[str]:
-    """`-r N`, where N is the session's position among the project's sessions,
-    newest first. Resolved fresh on every call because the position moves as
-    sessions are created. Raises rather than falling back to `--resume latest`:
-    a wrong session opened silently is worse than a refusal."""
+    """`--resume <uuid>`. The file name carries only the first 8 characters of
+    the id, so the full one is read from the session itself. Raises rather
+    than falling back to `--resume latest`: a wrong session opened silently is
+    worse than a refusal."""
     if not session_path:
         raise ResumeUnavailable(
             f"gemini session {sid} has no session file to locate it by")
@@ -111,18 +111,12 @@ def _resume_selector(sid: str, session_path: str) -> list[str]:
     target = _read_session_id(p)
     if not target:
         raise ResumeUnavailable(f"cannot read a sessionId from {p}")
-    for i, (found, _) in enumerate(_unique_sessions(p.parent.parent), start=1):
-        if found == target:
-            return ["-r", str(i)]
-    raise ResumeUnavailable(
-        f"gemini no longer lists session {target} under {p.parent.parent}; "
-        f"it may have been deleted")
+    return ["--resume", target]
 
 
 class GeminiHandler(Handler):
     name = "gemini"
     detect_substrings = ["gemini-cli"]
-    resume_by_position = True
 
     def default_dirs(self, base: Path | None = None):
         config_dir = base or (HOME / ".gemini")

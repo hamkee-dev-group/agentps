@@ -10,8 +10,9 @@ from pathlib import Path
 
 from .core import AgentInstance, all_instances, detect_handler, instance_for_pid
 from .format import fmt_age
-from .proc import (parent_chain, proc_cmdline, proc_cwd, proc_start_ticks,
-                   proc_starttime, proc_state, proc_status, tmux_panes)
+from .proc import (parent_chain, proc_cmdline, proc_cwd, proc_environ,
+                   proc_start_ticks, proc_starttime, proc_state, proc_status,
+                   tmux_panes)
 
 
 def _user_for_uid(uid: int) -> str:
@@ -124,10 +125,13 @@ def discover(registry: list[AgentInstance] | None = None,
     return rows
 
 
-# Gemini's bootstrap fork-execs itself to grow the heap, so parent and child
-# are both gemini and stand for one user-facing session. Matching the flag
-# keeps a genuinely nested session — an agent launched from inside another
-# agent's shell — from being swallowed as if it were a relauncher.
+# Gemini's bootstrap re-executes itself as a child, so parent and child are
+# both gemini and stand for one user-facing session. The child is marked by
+# GEMINI_CLI_NO_RELAUNCH in its environment; the heap flag is only added when
+# the machine has memory to spare, so it is a fallback for unreadable environ.
+# Requiring the parent to be the same agent keeps a genuinely nested session —
+# an agent launched from inside another agent's shell — from being swallowed.
+_RELAUNCH_ENV = "GEMINI_CLI_NO_RELAUNCH"
 _RELAUNCH_FLAG = "--max-old-space-size"
 
 
@@ -136,6 +140,8 @@ def _is_relaunch_child(row, pid_to_handler, pid_to_ppid) -> bool:
     parent = pid_to_ppid.get(pid, 0)
     if pid_to_handler.get(parent) is not pid_to_handler.get(pid):
         return False
+    if proc_environ(pid).get(_RELAUNCH_ENV) == "true":
+        return True
     return any(_RELAUNCH_FLAG in a for a in (row.get("live_argv") or []))
 
 

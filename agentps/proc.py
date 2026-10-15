@@ -54,6 +54,20 @@ def proc_exe(pid: int) -> str | None:
         return None
 
 
+def proc_environ(pid: int) -> dict[str, str]:
+    """The process environment as it was at exec. Empty for other users'
+    processes, which /proc does not let us read."""
+    raw = _read(pid, "environ")
+    if not raw:
+        return {}
+    out = {}
+    for item in raw.decode("utf-8", "replace").split("\x00"):
+        k, sep, v = item.partition("=")
+        if sep:
+            out[k] = v
+    return out
+
+
 def proc_status(pid: int) -> dict:
     raw = _read(pid, "status")
     if not raw:
