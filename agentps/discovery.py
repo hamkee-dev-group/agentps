@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import stat
 from pathlib import Path
 
 from .core import AgentInstance, all_instances, detect_handler, instance_for_pid
@@ -184,7 +185,18 @@ def enumerate_sessions(registry: list[AgentInstance] | None = None
 
 
 def _cwd_missing(cwd: str | None) -> bool:
-    return not (cwd and cwd != "?" and os.path.isdir(cwd))
+    """True only when the recorded cwd is known to be gone. An unrecorded cwd
+    ('?') or one we merely cannot stat (permissions, a hung mount) is not
+    evidence the project is gone, and --orphans deletes on this answer."""
+    if not cwd or cwd == "?":
+        return False
+    try:
+        st = os.stat(cwd)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return not stat.S_ISDIR(st.st_mode)
 
 
 def discover_all(registry: list[AgentInstance] | None = None,
