@@ -53,12 +53,17 @@ def _project_chats(project_dir: Path) -> list[Path]:
     chats = project_dir / "chats"
     if not chats.is_dir():
         return []
-    files = list(chats.glob("session-*.jsonl"))
-    try:
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        pass
-    return files
+    # Stat once and drop files that vanish meanwhile: one failed stat inside
+    # sort() would abandon the sort, and `-r N` would then count positions in
+    # glob order and open the wrong session.
+    stamped = []
+    for p in chats.glob("session-*.jsonl"):
+        try:
+            stamped.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    stamped.sort(key=lambda t: t[0], reverse=True)
+    return [p for _, p in stamped]
 
 
 def _unique_sessions(project_dir: Path) -> list[tuple[str, Path]]:

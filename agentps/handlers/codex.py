@@ -69,7 +69,8 @@ def _resume_flags(db: Path, sid: str) -> list[str]:
     if sandbox_kind:
         flags.extend(["--sandbox", sandbox_kind])
     if effort:
-        flags.extend(["-c", f"reasoning_effort={effort}"])
+        # The config key; a bare `reasoning_effort` is silently ignored.
+        flags.extend(["-c", f"model_reasoning_effort={effort}"])
     return flags
 
 
