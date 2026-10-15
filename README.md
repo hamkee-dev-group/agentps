@@ -130,9 +130,11 @@ Subcommands:
 
 - `top`: interactive TUI; also the default when no subcommand is given
 - `list`: print the table to stdout
-- `resume PREFIX`: open a session. A running session is joined (the agent's
-  own attach command, else its tmux pane) rather than resumed a second time;
-  anything else is resumed from its recorded cwd
+- `resume PREFIX`: open the agent on a session, resumed from its recorded cwd.
+  Where the agent has its own command for a running session it is used instead
+  (`claude attach` for a Claude background session). This never switches to a
+  tmux pane — for an agent started by a wrapper the pane shows the wrapper,
+  not the agent; use `attach` for that
 - `attach PREFIX`: join a running session: its tmux pane, or the agent's own
   attach command where it has one
 - `kill ...`: stop the sessions matched by id prefix or cwd path
@@ -199,7 +201,7 @@ The TUI is a curses interface over the same inventory used by `list`.
 Key actions:
 
 - `j` / `k` or arrow keys: move
-- `Enter` or `o`: open (joins a running session) or expand
+- `Enter` or `o`: open the agent on the session, or expand a group
 - `Space`: mark row or group
 - `a`: join a running session: its tmux pane or the agent's attach command
 - `c`: copy the command that opens the session, using OSC52

@@ -133,16 +133,14 @@ def _tmux_argv(pane: str) -> list[str]:
 
 
 def live_open_argv(instance: AgentInstance, row: dict) -> list[str] | None:
-    """How to reach a session that is running right now: the agent's own
-    attach command, else the tmux pane it runs in. None when neither exists."""
+    """The agent's own command for opening a session that is running right
+    now (`claude attach` for a background session), or None. The tmux pane is
+    deliberately not used here: it shows whatever runs in the pane, which for
+    an agent started by a wrapper (a headless `claude -p` under a runner) is
+    the wrapper's log, not the agent. Switching to the pane is `attach`."""
     if not row.get("pid"):
         return None
-    argv = instance.handler.open_live_argv(instance, row)
-    if argv:
-        return argv
-    if row.get("pane"):
-        return _tmux_argv(row["pane"])
-    return None
+    return instance.handler.open_live_argv(instance, row)
 
 
 def _exec(argv: list[str], env_extra: dict[str, str],
@@ -168,10 +166,9 @@ def _exec(argv: list[str], env_extra: dict[str, str],
 
 def open_row(row: dict, sid: str, registry: list[AgentInstance],
              print_only: bool = False) -> int:
-    """Open one session: join it if it is running, else resume it from its
-    recorded cwd. A running session is never resumed a second time when there
-    is a way to join it — two processes writing one session corrupt it, and
-    some agents refuse outright (claude for a background session)."""
+    """Open the agent on one session: through the agent's own attach command
+    when it has one for a running session (claude refuses to resume a running
+    background session), else by resuming it from its recorded cwd."""
     instance = _instance_by_name(registry, row["agent"])
     if instance is None:
         print(f"no handler for agent {row['agent']!r}", file=sys.stderr)
@@ -184,10 +181,11 @@ def open_row(row: dict, sid: str, registry: list[AgentInstance],
                   + " ".join(shlex.quote(a) for a in live))
             return 0
         return _exec(live, instance.env)
-    if row.get("pid"):
-        print(f"agentps: {sid} is already running (pid {row['pid']}, "
-              f"{row.get('where') or '-'}); resuming opens a second process "
-              f"on it.", file=sys.stderr)
+    if row.get("pid") and print_only:
+        hint = (f"; `agentps attach {sid[:8]}` switches to its tmux pane"
+                if row.get("pane") else "")
+        print(f"agentps: {sid} is still running (pid {row['pid']}){hint}",
+              file=sys.stderr)
 
     cwd = row["cwd"] if row["cwd"] != "?" else "."
     session_path = row.get("session_path") or ""

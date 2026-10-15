@@ -96,7 +96,7 @@ def _tui_help(stdscr, delay: float) -> None:
         "                       on a group header: marks all children",
         "",
         "  Actions",
-        "    Enter / o          open session (joins it if running), or expand/collapse a group",
+        "    Enter / o          open the agent on the session, or expand/collapse a group",
         "    a                  join a running session: its tmux pane or the agent's attach",
         "    c                  copy resume command for focused session (OSC52)",
         "    K                  stop the session (agent's own stop command, else SIGTERM)",
@@ -537,7 +537,7 @@ def _tui_main(stdscr, delay: float, sort_default: str, registry=None):
             if 0 <= focus < len(view) and view[focus][0] != "group":
                 r = rows[view[focus][1]]
                 inst = _instance_by_name(registry, r["agent"])
-                if inst and live_open_argv(inst, r):
+                if r.get("pane") or (inst and live_open_argv(inst, r)):
                     return ("attach", r)
                 msg = f"no tmux pane for this session (running under: " \
                       f"{r.get('where') or '-'})"
