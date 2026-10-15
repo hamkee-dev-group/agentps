@@ -30,6 +30,21 @@ def session_id(name: str | None) -> str | None:
     return name
 
 
+def _path_arg(arg: str) -> str | None:
+    """The absolute directory an ID-OR-PATH argument names, or None when it is
+    a session id prefix. Recorded cwds are absolute, so `./proj`, `..` and
+    `~/proj` are resolved first rather than silently matching nothing."""
+    if "/" not in arg and arg not in (".", "..") and not arg.startswith("~"):
+        return None
+    return os.path.abspath(os.path.expanduser(arg))
+
+
+def _under(cwd: str | None, base: str) -> bool:
+    if not cwd:
+        return False
+    return cwd == base or cwd.startswith(base.rstrip("/") + "/")
+
+
 def _instance_by_name(registry: list[AgentInstance],
                       name: str) -> AgentInstance | None:
     for inst in registry:
@@ -160,12 +175,11 @@ def _live_matches(prefixes, registry):
     live = discover(registry)
     out: dict[int, dict] = {}
     for arg in prefixes:
-        if "/" in arg:
-            base = arg.rstrip("/")
-            if not base:
+        base = _path_arg(arg)
+        if base is not None:
+            if base == "/":
                 return [], "refusing path '/' — name a directory"
-            hits = [r for r in live
-                    if r["cwd"] == base or r["cwd"].startswith(base + "/")]
+            hits = [r for r in live if _under(r["cwd"], base)]
             if not hits:
                 return [], f"no live agent under path {arg!r}"
             out.update({r["pid"]: r for r in hits})
@@ -339,23 +353,22 @@ def _resolve_dupes(registry: list[AgentInstance]):
 
 
 def _resolve_prefixes(args, registry):
-    """Resolve each arg to one or more sessions. Arg with `/` is a path; else a
+    """Resolve each arg to one or more sessions. A path (see _path_arg) or a
     UUID prefix. Returns (targets, error_msg). Targets deduped by
     session_path."""
     sessions = enumerate_sessions(registry)
     out: dict[str, tuple[str, dict]] = {}
     for arg in args:
-        if "/" in arg:
-            base = arg.rstrip("/")
-            if not base:
+        base = _path_arg(arg)
+        if base is not None:
+            if base == "/":
                 return [], (
                     "refusing path '/' — that would target every session. "
                     "Use --orphans/--dupes or a more specific path."
                 )
             matched = False
             for s in sessions:
-                cwd = s["cwd"]
-                if cwd == base or cwd.startswith(base + "/"):
+                if _under(s["cwd"], base):
                     sid = session_id(s["session"])
                     if sid:
                         out[s["session_path"]] = (sid, s)
