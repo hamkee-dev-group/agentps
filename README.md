@@ -75,7 +75,8 @@ Stop a runaway agent, or every agent under a directory:
 agentps kill 9b1c6f2e
 ```
 
-Jump to the tmux pane an agent is running in:
+Join a running agent — its tmux pane, or `claude attach` for a Claude
+background session:
 
 ```bash
 agentps attach 9b1c6f2e
@@ -129,9 +130,12 @@ Subcommands:
 
 - `top`: interactive TUI; also the default when no subcommand is given
 - `list`: print the table to stdout
-- `resume PREFIX`: resume a session from its cwd
-- `attach PREFIX`: switch to the tmux pane an agent is running in
-- `kill ...`: signal the processes behind a session, by id prefix or cwd path
+- `resume PREFIX`: open a session. A running session is joined (the agent's
+  own attach command, else its tmux pane) rather than resumed a second time;
+  anything else is resumed from its recorded cwd
+- `attach PREFIX`: join a running session: its tmux pane, or the agent's own
+  attach command where it has one
+- `kill ...`: stop the sessions matched by id prefix or cwd path
 - `delete ...`: delete sessions by id prefix or by cwd path
 
 Global options:
@@ -149,12 +153,18 @@ Kill options:
 - `-9`, `--force`: send `SIGKILL` instead of `SIGTERM`
 - `-y`, `--yes`: skip confirmation
 
-`kill` signals every process behind the matched sessions, and refuses to signal
-the session agentps itself was launched from.
+`kill` stops a session through the agent's own stop command where it has one
+(`claude stop` for a Claude background session, which keeps the conversation
+resumable), and otherwise signals every process behind it. `--force` always
+signals. It refuses to touch the session agentps itself was launched from, and
+skips any process that exited and whose PID was reused while it waited for
+confirmation.
 
 Delete options:
 
-- `--orphans`: delete sessions whose cwd no longer exists
+- `--orphans`: delete sessions whose cwd no longer exists. A cwd that was
+  never recorded, or that cannot be checked (permissions, a hung mount), does
+  not count
 - `--dupes`: delete duplicate copies of the same session id
 - `-y`, `--yes`: skip confirmation
 
@@ -178,6 +188,7 @@ Delete options:
   are grouped below a separator in `list`, and dimmed in the TUI
 - `SESSION`: shortened session id
 - `WHERE`: tmux pane, screen, or ssh when the process can be traced to one;
+  `bg:<id>` for a Claude background session (join it with `agentps attach`);
   otherwise `via:<name>` for whatever launched it — a systemd unit, cron, or a
   script — which is the usual case for agents started headlessly
 
@@ -188,11 +199,11 @@ The TUI is a curses interface over the same inventory used by `list`.
 Key actions:
 
 - `j` / `k` or arrow keys: move
-- `Enter` or `o`: open or expand
+- `Enter` or `o`: open (joins a running session) or expand
 - `Space`: mark row or group
-- `a`: switch to the agent's tmux pane
-- `c`: copy the resume command using OSC52
-- `K`: SIGTERM the processes behind the focused or marked sessions
+- `a`: join a running session: its tmux pane or the agent's attach command
+- `c`: copy the command that opens the session, using OSC52
+- `K`: stop the focused or marked sessions (agent's stop command, else SIGTERM)
 - `d`: delete focused or marked sessions
 - `g`: toggle group-by-cwd
 - `s`: toggle sort between date and path
@@ -202,39 +213,64 @@ Key actions:
 
 ## Session Handling Notes
 
+Checked against Claude Code 2.1.300, Codex 0.155 (and the 0.162 source),
+Gemini CLI 0.41.2 (and the 0.64 source), and opencode 1.18 (and the 2.0
+schema).
+
 ### Codex
 
 - Scans `~/.codex/sessions/`
-- Replays model, reasoning effort, approval mode, and sandbox mode from `state_5.sqlite`
-- Deletion removes both the rollout file and the matching `threads` row
+- `codex resume <id>` restores the thread's own model, effort and provider, so
+  none of them is replayed. Before codex 0.160 the approval policy and sandbox
+  mode are replayed from the session's last turn context; from 0.160 codex
+  restores them itself
+- Deletion runs `codex delete --force <id>`, which also clears the thread's
+  history, goals, queue and memory databases and refuses while a fork still
+  references it. Direct SQL is a fallback only when the binary is missing
+- The app-server daemon, sandbox helpers and non-session subcommands
+  (`mcp`, `app-server`, …) are not listed as sessions
 
 ### Claude
 
 - Scans `~/.claude/projects/`
+- Live processes are matched through Claude's own registry
+  (`~/.claude/sessions/<pid>.json`), then `--session-id` on the command line,
+  and only then by cwd
+- Background sessions (`claude --bg`, and agents launched from another session)
+  show as `bg:<id>`. Opening one runs `claude attach <id>` — `claude --resume`
+  refuses a session that is still running — and `kill` runs `claude stop <id>`
 - Reads each session's own recorded `cwd` from its JSONL. The encoded directory
   name is lossy — `/home/u/my-proj` and `/home/u/my/proj` encode identically —
   so it is only used for sessions that record no `cwd` of their own
 - Replays persisted permission mode on resume
+- Deletion also removes the session's subagent transcripts, file history,
+  saved environment, tasks and todos, and its background-job record unless that
+  job owns a worktree
 
 ### Gemini
 
 - Scans `~/.gemini/tmp/`
 - Deduplicates per-project snapshot files by inner `sessionId`
+- Resumes with `gemini --resume <uuid>`. Gemini accepts a full session id there
+  even though `--help` only mentions numbers; numbers count oldest-first and
+  shift as sessions come and go
 - Replays launch-only flags such as yolo or approval settings only when a live process is available
-- Gemini has no resume-by-id: `-r` takes `latest` or a position within the
-  project's sessions, so the index is only valid while that ordering holds.
-  agentps resolves it immediately before launching, and copied or printed
-  commands are emitted as `agentps resume <id>` so they re-resolve wherever
-  they are pasted
-- If a session can no longer be located, resume fails with a message instead
-  of falling back to the most recent session
 
 ### opencode
 
 - Reads `~/.local/share/opencode/opencode.db` (SQLite); there are no per-session files
+- Supports both schemas: `session` (1.x) and `session_v2` (2.x). While 2.x is
+  still migrating old sessions, the ones not yet copied are shown too
+- Only top-level sessions are listed; subagent sessions belong to their parent
 - Archived sessions are hidden; the session id itself is used as the display id
-- Replays the persisted model and agent on resume; launch-only flags such as `--dangerously-skip-permissions` only when a live process is available
-- Deletion removes the `session` row (child rows cascade) and any leftover `session_diff` blob
+- 1.x: replays the persisted model and agent on resume. 2.x reads them from the
+  session itself. Launch-only flags such as `--auto` only when a live process
+  is available
+- Deletion removes the session, its subagent sessions and their event logs.
+  On 2.x it goes through `opencode session delete`, since the shared
+  background service owns the database while it runs
+- 2.x's shared background service (`opencode serve --service`) is not listed
+  as a session
 
 ## Configuration
 
