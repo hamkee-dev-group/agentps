@@ -15,7 +15,8 @@ For an introduction and walkthrough, see the [agentps blog post](https://hamkee.
 
 - Lists live and historical agent sessions across supported tools
 - Maps a live process back to its session artifact when possible
-- Shows agent, PID, user, last-used time, cwd, session id, and launch context
+- Shows agent, PID, user, last-used time, cwd, session id, launch context,
+  and a title saying what the session was about
 - Resumes a session from its recorded working directory
 - Deletes orphaned sessions or duplicate copies
 - Provides a curses TUI for browsing, grouping, copying resume commands, and deleting sessions
@@ -193,10 +194,22 @@ Delete options:
   `bg:<id>` for a Claude background session (join it with `agentps attach`);
   otherwise `via:<name>` for whatever launched it — a systemd unit, cron, or a
   script — which is the usual case for agents started headlessly
+- `TITLE`: what the session was about, on one line of at most 80 characters.
+  The agent's own title where it keeps one — a Claude custom or generated
+  title, a Codex thread name or title, opencode's session title — and
+  otherwise the last thing the user typed. `-` for a session with neither,
+  such as one whose transcript is not written yet. In `--json` the field is
+  `title`, a string or `null`
+
+Titles are read from the end of a transcript, in 64 KiB chunks and never more
+than 4 MiB back, so a refresh does not parse whole transcripts. The agents'
+own session files are only read.
 
 ## TUI
 
 The TUI is a curses interface over the same inventory used by `list`.
+TITLE is the last column; on a narrow terminal it is the first to be cut,
+keeping its beginning, and CWD the second, keeping its tail.
 
 Key actions:
 
@@ -231,6 +244,10 @@ schema).
   references it. Direct SQL is a fallback only when the binary is missing
 - The app-server daemon, sandbox helpers and non-session subcommands
   (`mcp`, `app-server`, …) are not listed as sessions
+- Title: the thread's name, else its title, which codex takes from the first
+  prompt, both from `state_5.sqlite`. A rollout with neither shows its last
+  user message, without the `<environment_context>` block codex puts in front
+  of every turn
 
 ### Claude
 
@@ -245,6 +262,12 @@ schema).
   name is lossy — `/home/u/my-proj` and `/home/u/my/proj` encode identically —
   so it is only used for sessions that record no `cwd` of their own
 - Replays persisted permission mode on resume
+- Title: the session's `custom-title` entry, then its `ai-title`, then a
+  `summary`, else the last prompt — Claude's `last-prompt` entry or the newest
+  user message, skipping tool results, slash-command context, reminders and
+  interruptions. Claude re-emits these entries beside every prompt, so the
+  64 KiB behind the newest of them settle precedence, however much output
+  follows; a headless run's one prompt is found megabytes back
 - Deletion also removes the session's subagent transcripts, file history,
   saved environment, tasks and todos, and its background-job record unless that
   job owns a worktree
@@ -257,6 +280,8 @@ schema).
   even though `--help` only mentions numbers; numbers count oldest-first and
   shift as sessions come and go
 - Replays launch-only flags such as yolo or approval settings only when a live process is available
+- Title: Gemini keeps no session title, so the last user message of the
+  freshest snapshot is shown, as typed before `@file` references were expanded
 
 ### opencode
 
@@ -273,6 +298,7 @@ schema).
   background service owns the database while it runs
 - 2.x's shared background service (`opencode serve --service`) is not listed
   as a session
+- Title: the session's `title` column, which opencode fills for every session
 
 ## Configuration
 

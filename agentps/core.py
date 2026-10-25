@@ -46,7 +46,9 @@ class Handler:
     resume_by_position: bool = False
 
     def find_sessions(self, instance: "AgentInstance") -> Iterator[dict]:
-        """Yield session dicts: {session, session_path, cwd, last_used}."""
+        """Yield session dicts: {session, session_path, cwd, last_used, title}.
+        `title` is one line naming the session — the agent's own title where
+        it keeps one, else the last thing the user typed — or None."""
         return iter(())
 
     def default_dirs(self, base: Path | None = None) -> tuple[Path, Path]:

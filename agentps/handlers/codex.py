@@ -30,11 +30,18 @@ from pathlib import Path
 from typing import Iterator
 
 from ..core import AgentInstance, Handler, HOME, register
+from ..format import fmt_title
+from ..transcript import tail_lines
 
 
 _DB_TIMEOUT_MS = 5000
 _DB_FILE = "state_5.sqlite"
 _PID_SCAN_LIMIT = 200  # max rollouts to inspect when correlating a live PID
+_SID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_PROMPT_LINE_RE = re.compile(rb'"type":\s*"UserMessage"|"role":\s*"user"')
+# Blocks codex itself puts into a user message ahead of what was typed.
+_NOT_A_PROMPT = ("<environment_context>", "<user_instructions>",
+                 "<permissions instructions>", "<turn_aborted>")
 
 
 def _read_first_meta(rollout: Path) -> dict:
@@ -51,6 +58,66 @@ def _read_first_meta(rollout: Path) -> dict:
 def _meta_cwd(meta: dict) -> str | None:
     payload = meta.get("payload") or meta
     return payload.get("cwd") or payload.get("working_directory")
+
+
+def _prompt_text(obj: dict) -> str | None:
+    """What the user typed in a rollout line: a completed UserMessage item,
+    or on rollouts without those the user message among the response
+    items."""
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if obj.get("type") == "event_msg":
+        payload = payload.get("item")
+        if not isinstance(payload, dict) or payload.get("type") != "UserMessage":
+            return None
+    elif payload.get("type") != "message" or payload.get("role") != "user":
+        return None
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return None
+    texts = [c.get("text") for c in content if isinstance(c, dict)]
+    return "\n".join(t for t in texts if isinstance(t, str)
+                     and not t.lstrip().startswith(_NOT_A_PROMPT)) or None
+
+
+def _last_prompt(rollout: str) -> str | None:
+    for line in tail_lines(rollout):
+        if not _PROMPT_LINE_RE.search(line):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        title = fmt_title(_prompt_text(obj)) if isinstance(obj, dict) else None
+        if title:
+            return title
+    return None
+
+
+def _thread_titles(instance: AgentInstance) -> dict[str, str]:
+    """{thread id: title} from codex's own database: the name the thread was
+    given, else its title, which codex takes from the first prompt."""
+    db = instance.config_dir / _DB_FILE
+    if not db.exists():
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        con.execute(f"PRAGMA busy_timeout = {_DB_TIMEOUT_MS};")
+        rows = con.execute("SELECT id, name, title FROM threads").fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+    titles = {}
+    for tid, name, title in rows:
+        text = fmt_title(name) or fmt_title(title)
+        if text:
+            titles[tid] = text
+    return titles
 
 
 _CLI_TIMEOUT_S = 60
@@ -192,17 +259,21 @@ class CodexHandler(Handler):
         sd = instance.sessions_dir
         if not sd.is_dir():
             return
+        titles = _thread_titles(instance)
         for p in sd.rglob("rollout-*.jsonl"):
             try:
                 m = p.stat().st_mtime
             except OSError:
                 continue
             cwd = _meta_cwd(_read_first_meta(p)) or "?"
+            sid = _SID_RE.search(p.name)
+            title = titles.get(sid.group(0)) if sid else None
             yield {
                 "session": p.name,
                 "session_path": str(p),
                 "cwd": cwd,
                 "last_used": m,
+                "title": title or _last_prompt(str(p)),
             }
 
     def session_for_pid(self, instance, cwd, started):

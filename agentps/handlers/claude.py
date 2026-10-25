@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Iterator
 
 from ..core import AgentInstance, Handler, HOME, register
+from ..format import fmt_title
 from ..proc import proc_start_ticks
+from ..transcript import CHUNK, tail_lines
 
 
 _HEAD_LINES = 5
@@ -95,6 +97,70 @@ def _resume_flags(jsonl_path: str) -> list[str]:
     return []
 
 
+# Title sources, best first. Claude's own titles outrank the last prompt,
+# which is either its last-prompt entry or the newest user entry.
+_TITLE_RANK = {"custom-title": 0, "ai-title": 1, "summary": 2,
+               "last-prompt": 3, "user": 3}
+_TITLE_FIELD = {"custom-title": "customTitle", "ai-title": "aiTitle",
+                "summary": "summary", "last-prompt": "lastPrompt"}
+_TITLE_LINE_RE = re.compile(
+    rb'"type":\s*"(?:' + "|".join(_TITLE_RANK).encode() + rb')"')
+# User entries that are not something the user typed: slash commands and
+# their output, the reminders claude adds beside a prompt, background task
+# notifications, interruptions, and the entry that opens a compacted session.
+_NOT_A_PROMPT = ("<command-name>", "<local-command-", "<system-reminder>",
+                 "<task-notification>", "[Request interrupted",
+                 "This session is being continued from a previous conversation")
+
+
+def _prompt_text(obj: dict) -> str | None:
+    """What the user typed in a user entry, or None for tool results, meta
+    and sidechain entries, and the kinds above."""
+    if obj.get("isMeta") or obj.get("isSidechain"):
+        return None
+    msg = obj.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    texts = [b.get("text") for b in content
+             if isinstance(b, dict) and b.get("type") == "text"]
+    return "\n".join(t for t in texts if isinstance(t, str)
+                     and not t.lstrip().startswith(_NOT_A_PROMPT)) or None
+
+
+def _read_title(jsonl_path: str) -> str | None:
+    """Claude's own title for the session, else its last prompt. Claude
+    re-emits its title and last-prompt entries beside every new prompt, so
+    the chunk behind the newest entry found settles precedence among them,
+    however much output follows it — a headless run's one prompt may sit
+    megabytes back. A custom title cannot be beaten and ends the read."""
+    found = None
+    seen = 0
+    settled = None
+    for line in tail_lines(jsonl_path):
+        if found and (found[0] == 0 or seen > settled):
+            break
+        seen += len(line) + 1
+        if not _TITLE_LINE_RE.search(line):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") not in _TITLE_RANK:
+            continue
+        kind = obj["type"]
+        title = fmt_title(_prompt_text(obj) if kind == "user"
+                          else obj.get(_TITLE_FIELD[kind]))
+        if title and (found is None or _TITLE_RANK[kind] < found[0]):
+            if found is None:
+                settled = seen + CHUNK
+            found = (_TITLE_RANK[kind], title)
+    return found[1] if found else None
+
+
 class ClaudeHandler(Handler):
     name = "claude"
     # The native installer runs ~/.local/share/claude/versions/<ver>, whose
@@ -127,6 +193,7 @@ class ClaudeHandler(Handler):
                     "session_path": str(jf),
                     "cwd": _read_recorded_cwd(jf) or fallback,
                     "last_used": m,
+                    "title": _read_title(str(jf)),
                 }
 
     def is_agent_process(self, argv):

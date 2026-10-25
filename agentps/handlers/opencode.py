@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ..core import AgentInstance, Handler, HOME, register
+from ..format import fmt_title
 
 
 _DB_FILE = "opencode.db"
@@ -246,6 +247,7 @@ class OpenCodeHandler(Handler):
                 "session_path": _synth_path(instance.config_dir, sid),
                 "cwd": directory or "?",
                 "last_used": last_used,
+                "title": fmt_title(title),
             }
 
     def session_stat(self, instance, session_path):

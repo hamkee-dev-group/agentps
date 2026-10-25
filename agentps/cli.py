@@ -25,7 +25,7 @@ def print_table(rows) -> None:
         print("No CLI agents found.")
         return
     header = ["AGENT", "PID", "S", "USER", "LAST_USED", "AGE", "IDLE", "CWD",
-              "SESSION", "WHERE"]
+              "SESSION", "WHERE", "TITLE"]
     out = [header]
     split_at = None  # row index where missing-cwd block begins
     for a in rows:
@@ -42,6 +42,7 @@ def print_table(rows) -> None:
             a["cwd"],
             short_session(a["session"]),
             shorten(a["where"], 28),
+            a.get("title") or "-",
         ])
     widths = [max(len(r[i]) for r in out) for i in range(len(out[0]))]
     line = "  ".join(f"{{:<{w}}}" for w in widths)

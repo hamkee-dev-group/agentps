@@ -23,10 +23,16 @@ those flags; for cold sessions we don't.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Iterator
 
 from ..core import AgentInstance, Handler, HOME, ResumeUnavailable, register
+from ..format import fmt_title
+from ..transcript import tail_lines
+
+
+_PROMPT_LINE_RE = re.compile(rb'"type":\s*"user"')
 
 
 def _read_project_root(project_dir: Path) -> str | None:
@@ -46,6 +52,37 @@ def _read_session_id(jsonl: Path) -> str | None:
         return json.loads(head).get("sessionId")
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _part_text(content) -> str | None:
+    """Text of a message's content: a string, or a list of strings and
+    parts."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    texts = [p if isinstance(p, str) else p.get("text")
+             for p in content if isinstance(p, (str, dict))]
+    return "\n".join(t for t in texts if isinstance(t, str))
+
+
+def _last_prompt(jsonl: str) -> str | None:
+    """The newest user message. `displayContent` is what was typed before
+    @file references were expanded into `content`."""
+    for line in tail_lines(jsonl):
+        if not _PROMPT_LINE_RE.search(line):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "user":
+            continue
+        title = (fmt_title(_part_text(obj.get("displayContent")))
+                 or fmt_title(_part_text(obj.get("content"))))
+        if title:
+            return title
+    return None
 
 
 def _project_chats(project_dir: Path) -> list[Path]:
@@ -140,6 +177,7 @@ class GeminiHandler(Handler):
                     "session_path": str(p),
                     "cwd": cwd,
                     "last_used": m,
+                    "title": _last_prompt(str(p)),
                 }
 
     def session_for_pid(self, instance, cwd, started):

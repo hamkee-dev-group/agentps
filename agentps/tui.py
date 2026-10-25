@@ -15,11 +15,11 @@ from .actions import (_instance_by_name, _self_pids, copy_to_clipboard,
 from .core import ResumeUnavailable, all_instances
 from .discovery import discover, discover_all
 from .format import (ARROWS, SORT_ASC, SORT_DESC, fmt_date, fmt_idle, fmt_pid,
-                     short_session, shorten)
+                     short_session, shorten, truncate)
 
 
 _TUI_HEADER = ["AGENT", "PID", "S", "USER", "LAST_USED", "AGE", "IDLE", "CWD",
-               "SESSION", "WHERE"]
+               "SESSION", "WHERE", "TITLE"]
 
 
 def row_key(r) -> str:
@@ -41,34 +41,44 @@ def _tui_cells(r):
         r["cwd"],
         short_session(r.get("session")),
         r.get("where") or "-",
+        r.get("title") or "-",
     ]
 
 
 _CWD_COL = _TUI_HEADER.index("CWD")
 _DATE_COL = _TUI_HEADER.index("LAST_USED")
+_TITLE_COL = _TUI_HEADER.index("TITLE")
 _MIN_CWD = 16
+_MIN_TITLE = 12
 _MARKER_WIDTH = 3      # focus mark, selection mark, space
 
 
 def _tui_widths(rows, header, max_width: int | None = None):
-    """Column widths, with CWD given up to whatever is left. It is the only
-    unbounded column, so without a cap one deep path pushes SESSION and WHERE
-    off the right edge."""
+    """Column widths, with TITLE and then CWD given up to whatever is left.
+    They are the unbounded columns, so without a cap one deep path pushes
+    SESSION and WHERE off the right edge. TITLE gives way first: the path is
+    what the rows are grouped and sorted by."""
     cells = [header] + [_tui_cells(r) for r in rows]
     widths = [max(len(row[i]) for row in cells) for i in range(len(header))]
     if max_width:
         used = sum(widths) + 2 * (len(widths) - 1) + _MARKER_WIDTH
         overflow = used - max_width
-        if overflow > 0:
-            widths[_CWD_COL] = max(_MIN_CWD, widths[_CWD_COL] - overflow)
+        for col, floor in ((_TITLE_COL, _MIN_TITLE), (_CWD_COL, _MIN_CWD)):
+            give = min(overflow, widths[col] - floor)
+            if give > 0:
+                widths[col] -= give
+                overflow -= give
     return widths
 
 
 def _fit(cells, widths):
-    """Shorten the cwd cell to its allotted width, keeping the tail."""
+    """Cut the cwd and title cells to their allotted widths: the cwd keeps
+    its tail, the title its head."""
+    cells = list(cells)
     if len(cells[_CWD_COL]) > widths[_CWD_COL]:
-        cells = list(cells)
         cells[_CWD_COL] = shorten(cells[_CWD_COL], widths[_CWD_COL])
+    if len(cells[_TITLE_COL]) > widths[_TITLE_COL]:
+        cells[_TITLE_COL] = truncate(cells[_TITLE_COL], widths[_TITLE_COL])
     return cells
 
 

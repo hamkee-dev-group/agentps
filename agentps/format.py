@@ -72,6 +72,30 @@ def shorten(s: str, n: int) -> str:
     return ELLIPSIS + s[-(n - len(ELLIPSIS)):]
 
 
+def truncate(s: str, n: int) -> str:
+    """shorten's mirror: keep the head, which is the informative end of a
+    title."""
+    if len(s) <= n:
+        return s
+    if n <= len(ELLIPSIS):
+        return s[:n]
+    return s[:n - len(ELLIPSIS)] + ELLIPSIS
+
+
+TITLE_WIDTH = 80
+
+
+def fmt_title(text) -> str | None:
+    """A session title on one line: whitespace collapsed, control characters
+    dropped, cut to TITLE_WIDTH keeping the beginning. None when there is
+    nothing to show."""
+    if not isinstance(text, str):
+        return None
+    text = " ".join("".join(c for c in text
+                            if c.isprintable() or c.isspace()).split())
+    return truncate(text, TITLE_WIDTH) if text else None
+
+
 def fmt_pid(row) -> str:
     """PID cell. A session can be held by several processes (opencode opens one
     per attached client); show the primary and how many more."""

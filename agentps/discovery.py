@@ -109,6 +109,7 @@ def discover(registry: list[AgentInstance] | None = None,
             "session": sess.name if sess else None,
             "session_path": str(sess) if sess else None,
             "last_used": last_used,
+            "title": None,
             "where": where,
             "pane": pane,
             "live_argv": argv or None,
@@ -227,12 +228,15 @@ def discover_all(registry: list[AgentInstance] | None = None,
     """Live processes + on-disk sessions, deduped by session_path. Live wins."""
     registry = registry if registry is not None else all_instances()
     live = discover(registry, loose=loose)
-    live_paths = {a["session_path"] for a in live if a.get("session_path")}
+    live_by_path = {a["session_path"]: a for a in live if a.get("session_path")}
 
     by_name = {inst.name: inst for inst in registry}
     rows = list(live)
     for s in enumerate_sessions(registry):
-        if s["session_path"] in live_paths:
+        held = live_by_path.get(s["session_path"])
+        if held is not None:
+            # A running session's title is in its artifact like any other's.
+            held["title"] = s.get("title")
             continue
         inst = by_name.get(s["agent"])
         uid = None
@@ -249,6 +253,7 @@ def discover_all(registry: list[AgentInstance] | None = None,
             "session": s["session"],
             "session_path": s["session_path"],
             "last_used": s["last_used"],
+            "title": s.get("title"),
             "where": "-",
             "pane": None,
             "state": "",
