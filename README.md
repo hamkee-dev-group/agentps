@@ -300,6 +300,25 @@ schema).
   as a session
 - Title: the session's `title` column, which opencode fills for every session
 
+## Using agentps from Python
+
+The same discovery the CLI uses is importable:
+
+```python
+from agentps import discovery
+
+for row in discovery.discover_all():          # live processes + sessions on disk
+    print(row["agent"], row["pid"], row["cwd"], row["entrypoint"], row["title"])
+```
+
+Every row has every key in `discovery.ROW_FIELDS`, which also says what each one
+means; a value the agent does not record is `None`. Rows with a running process
+also carry the keys in `discovery.LIVE_FIELDS`. `entrypoint` is what started the
+session in the agent's own words: claude's `entrypoint` (`cli`, `sdk-cli`,
+`claude-desktop`, ...) or codex's `originator` (`codex_exec`, `Codex Desktop`,
+...). Calling `discover_all()` repeatedly is cheap: a transcript is read again
+only when its size or modification time changed.
+
 ## Configuration
 
 Default config path:

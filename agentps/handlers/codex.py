@@ -31,7 +31,7 @@ from typing import Iterator
 
 from ..core import AgentInstance, Handler, HOME, register
 from ..format import fmt_title
-from ..transcript import tail_lines
+from ..transcript import file_facts, tail_lines
 
 
 _DB_TIMEOUT_MS = 5000
@@ -53,6 +53,15 @@ def _read_first_meta(rollout: Path) -> dict:
         return json.loads(head)
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _session_facts(rollout: str) -> dict:
+    meta = _read_first_meta(Path(rollout))
+    payload = meta.get("payload") if isinstance(meta.get("payload"), dict) else meta
+    # codex calls what started the session its originator: codex_exec, Codex Desktop, ...
+    origin = payload.get("originator") if isinstance(payload, dict) else None
+    return {"cwd": _meta_cwd(meta), "entrypoint": origin if isinstance(origin, str) else None,
+            "last_prompt": _last_prompt(rollout)}
 
 
 def _meta_cwd(meta: dict) -> str | None:
@@ -265,15 +274,16 @@ class CodexHandler(Handler):
                 m = p.stat().st_mtime
             except OSError:
                 continue
-            cwd = _meta_cwd(_read_first_meta(p)) or "?"
+            facts = file_facts(str(p), _session_facts)
             sid = _SID_RE.search(p.name)
             title = titles.get(sid.group(0)) if sid else None
             yield {
                 "session": p.name,
                 "session_path": str(p),
-                "cwd": cwd,
+                "cwd": facts["cwd"] or "?",
                 "last_used": m,
-                "title": title or _last_prompt(str(p)),
+                "title": title or facts["last_prompt"],
+                "entrypoint": facts["entrypoint"],
             }
 
     def session_for_pid(self, instance, cwd, started):

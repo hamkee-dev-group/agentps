@@ -223,9 +223,35 @@ def _cwd_missing(cwd: str | None) -> bool:
     return not stat.S_ISDIR(st.st_mode)
 
 
+# The fields of a discover_all() row: the part of agentps another program may rely on.
+# Every row has every key; a value the source does not record is None. Live-only keys
+# (pid_ticks, pids, live_argv, name) appear only on rows with a running process.
+ROW_FIELDS = {
+    "agent": "handler name: claude, codex, gemini, opencode, or a user handler's",
+    "pid": "the agent's process id, or None for a session on disk with no process",
+    "user": "owner of the process, or of the session file; '?' when unknown",
+    "cwd": "the session's working directory as the agent recorded it",
+    "cwd_missing": "True when that directory no longer exists",
+    "start": "process start time (HH:MM, or a date when older); None without a process",
+    "age": "how long the process has run; '-' without a process",
+    "state": "the process state ('' without a process)",
+    "session": "the session's file name (or id) in the agent's own store",
+    "session_path": "the session's artifact on disk",
+    "last_used": "mtime of the artifact, seconds since the epoch",
+    "title": "what the session is about: the agent's own title, else the last prompt",
+    "entrypoint": ("what started the session, in the agent's own words (claude's "
+                   "entrypoint: cli, sdk-cli, claude-desktop, ...; codex's originator: "
+                   "codex_exec, Codex Desktop, ...); None when the agent records none"),
+    "where": "where it runs: a tmux pane, a terminal, 'via:<parent>', or '-'",
+    "pane": "its tmux pane id, or None",
+}
+LIVE_FIELDS = ("pid_ticks", "pids", "live_argv", "name")
+
+
 def discover_all(registry: list[AgentInstance] | None = None,
                  loose: bool = False) -> list[dict]:
-    """Live processes + on-disk sessions, deduped by session_path. Live wins."""
+    """Live processes + on-disk sessions, deduped by session_path. Live wins.
+    Each row's keys are documented in ROW_FIELDS (and LIVE_FIELDS)."""
     registry = registry if registry is not None else all_instances()
     live = discover(registry, loose=loose)
     live_by_path = {a["session_path"]: a for a in live if a.get("session_path")}
@@ -237,6 +263,7 @@ def discover_all(registry: list[AgentInstance] | None = None,
         if held is not None:
             # A running session's title is in its artifact like any other's.
             held["title"] = s.get("title")
+            held["entrypoint"] = s.get("entrypoint")
             continue
         inst = by_name.get(s["agent"])
         uid = None
@@ -254,12 +281,14 @@ def discover_all(registry: list[AgentInstance] | None = None,
             "session_path": s["session_path"],
             "last_used": s["last_used"],
             "title": s.get("title"),
+            "entrypoint": s.get("entrypoint"),
             "where": "-",
             "pane": None,
             "state": "",
         })
 
     for r in rows:
+        r.setdefault("entrypoint", None)
         r["cwd_missing"] = _cwd_missing(r.get("cwd"))
 
     rows.sort(key=lambda r: (r["cwd_missing"], -(r.get("last_used") or 0)))

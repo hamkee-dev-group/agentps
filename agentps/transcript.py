@@ -10,6 +10,27 @@ from typing import Iterator
 
 CHUNK = 64 * 1024
 TAIL_LIMIT = 4 * 1024 * 1024
+_CACHE_MAX = 20000
+_cache: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
+def file_facts(path: str, read) -> dict:
+    """read(path) -> dict, cached until the file's size or mtime changes. A
+    caller that polls (a TUI, or a program importing agentps) then reads only
+    the transcripts that moved since its last look, not every one each time."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return read(path)
+    key = (st.st_size, st.st_mtime_ns)
+    hit = _cache.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    if len(_cache) >= _CACHE_MAX:
+        _cache.clear()
+    facts = read(path)
+    _cache[path] = (key, facts)
+    return facts
 
 
 def tail_lines(path: str, limit: int = TAIL_LIMIT) -> Iterator[bytes]:

@@ -31,7 +31,7 @@ from typing import Iterator
 from ..core import AgentInstance, Handler, HOME, register
 from ..format import fmt_title
 from ..proc import proc_start_ticks
-from ..transcript import CHUNK, tail_lines
+from ..transcript import CHUNK, file_facts, tail_lines
 
 
 _HEAD_LINES = 5
@@ -53,23 +53,37 @@ def _argv_value(argv: list[str], flag: str) -> str | None:
     return None
 
 
-def _read_recorded_cwd(jsonl_path: Path) -> str | None:
+def _read_head(jsonl_path) -> dict:
+    """cwd and entrypoint (what started the session: cli, sdk-cli,
+    claude-desktop, ...) from the first lines, which carry both."""
+    head = {"cwd": None, "entrypoint": None}
     try:
         with open(jsonl_path, "r", errors="replace") as f:
             for _ in range(_HEAD_LINES):
                 line = f.readline()
                 if not line:
-                    return None
+                    break
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                cwd = obj.get("cwd")
-                if cwd:
-                    return cwd
+                if not isinstance(obj, dict):
+                    continue
+                head["cwd"] = head["cwd"] or obj.get("cwd")
+                head["entrypoint"] = head["entrypoint"] or obj.get("entrypoint")
+                if head["cwd"] and head["entrypoint"]:
+                    break
     except OSError:
-        return None
-    return None
+        pass
+    return head
+
+
+def _read_recorded_cwd(jsonl_path: Path) -> str | None:
+    return _read_head(jsonl_path)["cwd"]
+
+
+def _session_facts(jsonl_path: str) -> dict:
+    return {**_read_head(jsonl_path), "title": _read_title(jsonl_path)}
 
 
 def _resume_flags(jsonl_path: str) -> list[str]:
@@ -188,12 +202,14 @@ class ClaudeHandler(Handler):
                     m = jf.stat().st_mtime
                 except OSError:
                     continue
+                facts = file_facts(str(jf), _session_facts)
                 yield {
                     "session": jf.name,
                     "session_path": str(jf),
-                    "cwd": _read_recorded_cwd(jf) or fallback,
+                    "cwd": facts["cwd"] or fallback,
                     "last_used": m,
-                    "title": _read_title(str(jf)),
+                    "title": facts["title"],
+                    "entrypoint": facts["entrypoint"],
                 }
 
     def is_agent_process(self, argv):
