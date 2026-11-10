@@ -312,7 +312,10 @@ for row in discovery.discover_all():          # live processes + sessions on dis
 ```
 
 Every row has every key in `discovery.ROW_FIELDS`, which also says what each one
-means; a value the agent does not record is `None`. Rows with a running process
+means; a value the agent does not record is `None`. `session_path` is the
+session's file for claude, codex and gemini, but opencode keeps all its sessions
+in one database, so its `session_path` is a stable key that is not a file: take
+times from `last_used`, never from `stat()`. Rows with a running process
 also carry the keys in `discovery.LIVE_FIELDS`. `entrypoint` is what started the
 session in the agent's own words: claude's `entrypoint` (`cli`, `sdk-cli`,
 `claude-desktop`, ...) or codex's `originator` (`codex_exec`, `Codex Desktop`,

@@ -236,7 +236,10 @@ ROW_FIELDS = {
     "age": "how long the process has run; '-' without a process",
     "state": "the process state ('' without a process)",
     "session": "the session's file name (or id) in the agent's own store",
-    "session_path": "the session's artifact on disk",
+    "session_path": ("the session's stable key: its file on disk for claude, codex and "
+                     "gemini. opencode keeps every session in one database, so for it this "
+                     "is a synthetic path under its data dir that does not exist; use "
+                     "last_used for its time, never stat() it"),
     "last_used": "mtime of the artifact, seconds since the epoch",
     "title": "what the session is about: the agent's own title, else the last prompt",
     "entrypoint": ("what started the session, in the agent's own words (claude's "
